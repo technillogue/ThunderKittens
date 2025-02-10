@@ -356,6 +356,11 @@ struct batch_matmul_template {
     static constexpr int NUM_CONSUMER_WARPS = M_BLOCK * 4;
     static constexpr int INPUT_PIPE_STAGES = 4;
     static constexpr int PRODUCER_BARRIER_ARRIVALS = 1;
+
+    static constexpr int M_BLOCK = _M_BLOCK;
+    static constexpr int N_BLOCK = _N_BLOCK;
+    static constexpr int K_TILE = _K_TILE;
+
     
     using layout = batch_matmul_layout<M_BLOCK, N_BLOCK, K_TILE>;
     
@@ -420,6 +425,7 @@ struct batch_matmul_template {
         }
 
         __device__ static void compute(consumer_compute_args<layout> args) {
+            static_assert(K_TILE % 64 == 0, "K_TILE must be multiple of 64 for WGMMA");
             for (int n = 0; n < N_BLOCK; ++n) {
                 warpgroup::mma_ABt(
                     args.state.accum[n],
@@ -451,7 +457,7 @@ struct batch_matmul_template {
                 }
                 tma::store_async_wait<0>(); // Wait for all async stores to complete
             }
-
+            // this may be wrong
             // // 3. Cleanup and reset state for next iteration
             // warpgroup::sync(warpgroup::groupid() + 4);
             // for (int n = 0; n < N_BLOCK; ++n) {
@@ -485,11 +491,13 @@ void cpu_gemm(float* a, float* b, float* c, int B, int M, int N, int K) {
 
 template<typename mmt>
 void inner_run(bf16 *d_A, bf16 *d_B, bf16 *d_C, size_t B, size_t M, size_t N, size_t K, dim3 grid, dim3 block) {
-    using global_layout = typename mmt::layout::global_layout;
+    using global_layout_A = typename mmt::layout::global_layout_A;
+    using global_layout_B = typename mmt::layout::global_layout_B;
+    using global_layout_C = typename mmt::layout::global_layout_C;
     using globals  = typename mmt::layout::globals;
-    global_layout Ag{d_A, nullptr, nullptr, B, M, K};
-    global_layout Bg{d_B, nullptr, nullptr, B, K, N};
-    global_layout Cg{d_C, nullptr, nullptr, B, M, N};
+    global_layout_A Ag{d_A, nullptr, nullptr, B, M, K};
+    global_layout_B Bg{d_B, nullptr, nullptr, B, K, N};
+    global_layout_C Cg{d_C, nullptr, nullptr, B, M, N};
     globals G{Ag, Bg, Cg};
     prototype::lcf::kernel<mmt><<<grid, block, MAX_SHARED_MEMORY-1024>>>(G);
 }
