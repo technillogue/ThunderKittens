@@ -1,4 +1,4 @@
-/*#include "kittens.cuh"
+/*{#include "kittens.cuh"
 #include "prototype.cuh"
 
 using namespace kittens;
@@ -306,6 +306,7 @@ int main() {
     // run_benchmark<matmul_template<2,4,11>>(128*22*2, 256* 6*2, 8192*2);
     return 0;
 }
+}
 */
 #include "kittens.cuh"
 #include "prototype.cuh"
@@ -357,9 +358,9 @@ struct batch_matmul_template {
     static constexpr int INPUT_PIPE_STAGES = 4;
     static constexpr int PRODUCER_BARRIER_ARRIVALS = 1;
 
-    static constexpr int M_BLOCK = _M_BLOCK;
-    static constexpr int N_BLOCK = _N_BLOCK;
-    static constexpr int K_TILE = _K_TILE;
+    static constexpr int _M_BLOCK = M_BLOCK;
+    static constexpr int _N_BLOCK = N_BLOCK;
+    static constexpr int _K_TILE = K_TILE;
 
     
     using layout = batch_matmul_layout<M_BLOCK, N_BLOCK, K_TILE>;
@@ -507,7 +508,7 @@ int run_benchmark(size_t B, size_t M, size_t N, size_t K) {
     cudaError_t cudaStatus;
 
     std::cout << "--------------------  B=" << B << " M=" << M << " N=" << N << " K=" << K << "  --------------------\n";
-    std::cout << "Block size: " << mmt::M_BLOCK*16 << "x" << mmt::N_BLOCK*16 << "\n";
+    std::cout << "Block size: " << mmt::_M_BLOCK*16 << "x" << mmt::_N_BLOCK*16 << "\n";
 
     // Allocate host memory
     float *h_A = new float[B * M * K];
