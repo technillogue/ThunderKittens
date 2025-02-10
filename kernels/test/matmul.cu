@@ -617,7 +617,7 @@ int main() {
     int M = 4096, N = 4096, K = 4096;
     
     // Test different batch sizes and K values
-    run_benchmark<batch_matmul_template<2,4,16>>(B, M, N, K);
+    run_benchmark<batch_matmul_template<2,4,64>>(B, M, N, K);
     run_benchmark<batch_matmul_template<2,4,256>>(B, M, N, K);
     
     return 0;
