@@ -461,3 +461,155 @@ struct batch_matmul_template {
         }
     };
 };
+
+constexpr bool NCU = false;
+#include <iostream>
+#include <random>
+#include <cuda_bf16.h>
+#include <omp.h>
+
+void cpu_gemm(float* a, float* b, float* c, int B, int M, int N, int K) {
+    #pragma omp parallel for collapse(3) // Parallelize over batches and matrices
+    for (int b_idx = 0; b_idx < B; ++b_idx) {
+        for (int i = 0; i < M; ++i) {
+            for (int j = 0; j < N; ++j) {
+                float sum = 0.0f;
+                for (int k = 0; k < K; ++k) {
+                    sum += a[b_idx * M * K + i * K + k] * b[b_idx * K * N + k * N + j];
+                }
+                c[b_idx * M * N + i * N + j] = sum;
+            }
+        }
+    }
+}
+
+template<typename mmt>
+void inner_run(bf16 *d_A, bf16 *d_B, bf16 *d_C, size_t B, size_t M, size_t N, size_t K, dim3 grid, dim3 block) {
+    using global_layout = typename mmt::layout::global_layout;
+    using globals  = typename mmt::layout::globals;
+    global_layout Ag{d_A, nullptr, nullptr, B, M, K};
+    global_layout Bg{d_B, nullptr, nullptr, B, K, N};
+    global_layout Cg{d_C, nullptr, nullptr, B, M, N};
+    globals G{Ag, Bg, Cg};
+    prototype::lcf::kernel<mmt><<<grid, block, MAX_SHARED_MEMORY-1024>>>(G);
+}
+
+template<typename mmt>
+int run_benchmark(size_t B, size_t M, size_t N, size_t K) {
+    cudaError_t cudaStatus;
+
+    std::cout << "--------------------  B=" << B << " M=" << M << " N=" << N << " K=" << K << "  --------------------\n";
+    std::cout << "Block size: " << mmt::M_BLOCK*16 << "x" << mmt::N_BLOCK*16 << "\n";
+
+    // Allocate host memory
+    float *h_A = new float[B * M * K];
+    float *h_B = new float[B * K * N];
+    float *h_C = new float[B * M * N];
+    float *h_C_ref = new float[B * M * N];
+
+    // Initialize random number generator
+    std::random_device rd;
+    std::mt19937 gen(42);
+    std::uniform_real_distribution<> dis(-0.5, 0.5);
+
+    // Initialize matrices with random values
+    for (int i = 0; i < B * M * K; ++i) h_A[i] = dis(gen);
+    for (int i = 0; i < B * K * N; ++i) h_B[i] = dis(gen);
+
+    // Perform CPU matrix multiplication for reference
+    cpu_gemm(h_A, h_B, h_C_ref, B, M, N, K);
+
+    // Allocate device memory
+    __nv_bfloat16 *d_A, *d_B, *d_C;
+    cudaMalloc(&d_A, B * M * K * sizeof(__nv_bfloat16));
+    cudaMalloc(&d_B, B * K * N * sizeof(__nv_bfloat16));
+    cudaMalloc(&d_C, B * M * N * sizeof(__nv_bfloat16));
+
+    // Convert to __nv_bfloat16 and copy to device
+    __nv_bfloat16 *h_A_bf16 = new __nv_bfloat16[B * M * K];
+    __nv_bfloat16 *h_B_bf16 = new __nv_bfloat16[B * K * N];
+    for (int i = 0; i < B * M * K; ++i) h_A_bf16[i] = __float2bfloat16(h_A[i]);
+    for (int i = 0; i < B * K * N; ++i) h_B_bf16[i] = __float2bfloat16(h_B[i]);
+
+    cudaMemcpy(d_A, h_A_bf16, B * M * K * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B_bf16, B * K * N * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice);
+
+    // Set up shared memory
+    unsigned long mem_size = MAX_SHARED_MEMORY - 1024;
+    cudaFuncSetAttribute(prototype::lcf::kernel<mmt>, cudaFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+
+    // Launch kernel
+    dim3 grid = mmt::grid(B, M, N, K);
+    dim3 block(kittens::prototype::detail::NUM_THREADS_v<mmt>);
+    
+    // Warmup
+    for(int i = 0; i < (NCU ? 0 : 2); i++) {
+        inner_run<mmt>(d_A, d_B, d_C, B, M, N, K, grid, block);
+    }
+
+    // Timing
+    cudaDeviceSynchronize();
+    auto start = std::chrono::high_resolution_clock::now();
+
+    constexpr int ITERS = (NCU ? 1 : 10);
+    for(int i = 0; i < ITERS; i++) {
+        inner_run<mmt>(d_A, d_B, d_C, B, M, N, K, grid, block);
+    }
+    cudaDeviceSynchronize();
+    auto end = std::chrono::high_resolution_clock::now();
+
+    // Calculate performance
+    std::chrono::duration<double> diff = end - start;
+    double useconds = diff.count() * 1e6 / ITERS;
+    double flops = double(2.0) * B * M * N * K;
+    double tflops = (flops / useconds) / 1e6;
+
+    std::cout << "Avg Kernel execution time: " << useconds << " us\n";
+    std::cout << "Achieved performance: " << tflops << " TFLOPs\n";
+
+    // Verify results
+    __nv_bfloat16 *h_C_bf16 = new __nv_bfloat16[B * M * N];
+    cudaMemcpy(h_C_bf16, d_C, B * M * N * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+
+    float max_error = 0.0f;
+    int error_count = 0;
+    for (int b = 0; b < B; ++b) {
+        for (int i = 0; i < M * N; ++i) {
+            float error = std::abs(__bfloat162float(h_C_bf16[b * M * N + i]) - h_C_ref[b * M * N + i]);
+            if(error > 1.0) {
+                if(error_count < 20) std::cout << "Error at batch " << b << " row " << i / N << " col " << i % N << ": " 
+                    << __bfloat162float(h_C_bf16[b * M * N + i]) << " != " << h_C_ref[b * M * N + i] << " (ref)\n";
+                error_count++;
+            }
+            max_error = std::max(max_error, error);
+        }
+    }
+
+    std::cout << "Max error: " << max_error << "\n";
+    std::cout << "Error count: " << error_count << "\n";
+
+    // Cleanup
+    delete[] h_A;
+    delete[] h_B;
+    delete[] h_C;
+    delete[] h_C_ref;
+    delete[] h_A_bf16;
+    delete[] h_B_bf16;
+    delete[] h_C_bf16;
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+
+    return 0;
+}
+
+int main() {
+    int B = 2; // Batch size
+    int M = 4096, N = 4096, K = 4096;
+    
+    // Test different batch sizes and K values
+    run_benchmark<batch_matmul_template<2,4,16>>(B, M, N, K);
+    run_benchmark<batch_matmul_template<2,4,256>>(B, M, N, K);
+    
+    return 0;
+}
