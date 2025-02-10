@@ -317,9 +317,9 @@ using namespace kittens::prototype::lcf;
 // Batch MatMul Layout with configurable K_TILE
 template<int M_BLOCK, int N_BLOCK, int K_TILE>
 struct batch_matmul_layout {
-    using base_tile_A = st_bf<16, K_TILE>; // 16xK_TILE tiles for A
-    using base_tile_B = st_bf<K_TILE, 16>; // K_TILEx16 tiles for B
-    using base_tile_C = st_bf<16, 16>;     // 16x16 output tiles
+    using base_tile_A = st_bf<64, K_TILE>; // 64xK_TILE tiles for A
+    using base_tile_B = st_bf<K_TILE, 64>; // K_TILEx64 tiles for B
+    using base_tile_C = st_bf<64, 64>;     // 64x64 output tiles
     
     using global_layout_A = gl<bf16, -1, 1, -1, -1, base_tile_A>;
     using global_layout_B = gl<bf16, -1, 1, -1, -1, base_tile_B>;
@@ -346,7 +346,7 @@ struct batch_matmul_layout {
     };
     
     struct consumer_state { 
-        rt_fl<16, 16> accum[N_BLOCK];
+        rt_fl<64, 64> accum[N_BLOCK];
     };
 };
 
@@ -367,7 +367,7 @@ struct batch_matmul_template {
     // Grid setup for persistent kernel
     template<bool PERSISTENT_GRID=true>
     static dim3 grid(int B, int M, int N, int K) {
-        int tiles_per_batch = (M/16) * (N/16);
+        int tiles_per_batch = (M/64) * (N/64);
         return dim3(
             PERSISTENT_GRID ? 132 : tiles_per_batch,
             1,
