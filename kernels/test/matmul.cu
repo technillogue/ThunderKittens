@@ -68,22 +68,23 @@ struct matmul_template {
                 tma::expect(args.inputs_arrived, args.input);
                 for(int i = 0; i < M_BLOCK; i++) {
                     const int row = args.common.coord.x + i;
-                    if(row < args.globals.A.rows) {
+                    if(row * 64 < args.globals.A.rows) {
                         tma::load_async(args.input.a[i], args.globals.A,
-                                       {args.common.batch, 0, row, args.iter}, 
+                                       {args.common.batch, 0, row, args.iter},
                                        args.inputs_arrived);
                     }
                 }
                 for(int i = 0; i < N_BLOCK; i++) {
                     const int col = args.common.coord.y + i;
-                    if(col < args.globals.B.cols) {
+                    if(col * 64 < args.globals.B.cols) {
                         tma::load_async(args.input.b[i], args.globals.B,
-                                       {args.common.batch, 0, args.iter, col}, 
+                                       {args.common.batch, 0, args.iter, col},
                                        args.inputs_arrived);
                     }
                 }
             }
         }
+
     };
 
     struct consumer {

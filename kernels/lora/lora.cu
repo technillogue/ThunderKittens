@@ -1,4 +1,3 @@
-
 #include <cuda.h>
 #include <cuda_bf16.h>
 #include <iostream>
