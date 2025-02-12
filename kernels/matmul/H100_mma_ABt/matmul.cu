@@ -21,8 +21,8 @@ struct matmul_template {
     using wide_tile = st_bf<64, 64*N_BLOCK>;
     static constexpr int NUM_CONSUMER_WARPS=M_BLOCK*4, INPUT_PIPE_STAGES=4, PRODUCER_BARRIER_ARRIVALS=1;
     // Helper functions
-    template<bool PERISISTENT_GRID=true> __host__ static inline dim3 grid(int M, int N, int K) {
-        return dim3(PERISISTENT_GRID ? 132 : M*N/(M_BLOCK*N_BLOCK*layout::base_tile::num_elements));
+    template<bool PERSISTENT_GRID=true> __host__ static inline dim3 grid(int M, int N, int K) {
+        return dim3(PERSISTENT_GRID ? 132 : M*N/(M_BLOCK*N_BLOCK*layout::base_tile::num_elements));
     }
       // ThunderKittens template functions
     __device__ static inline void common_setup(common_setup_args<layout> args) {

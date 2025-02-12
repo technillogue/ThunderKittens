@@ -30,8 +30,8 @@ struct matmul_template {
     using layout    = matmul_layout;
     static constexpr int NUM_CONSUMER_WARPS=8, INPUT_PIPE_STAGES=4, PRODUCER_BARRIER_ARRIVALS=1;
     // Helper functions
-    template<bool PERISISTENT_GRID=true> __host__ static inline dim3 grid(int M, int N, int K) {
-        return dim3(PERISISTENT_GRID ? 132 : M*N/(2*layout::c_tile::num_elements));
+    template<bool PERSISTENT_GRID=true> __host__ static inline dim3 grid(int M, int N, int K) {
+        return dim3(PERSISTENT_GRID ? 132 : M*N/(2*layout::c_tile::num_elements));
     }
     // ThunderKittens template functions
     __device__ static inline void common_setup(common_setup_args<layout> args) {
