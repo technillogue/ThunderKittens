@@ -48,11 +48,12 @@ struct matmul_template {
     using wide_tile = st_bf<64, 64*N_BLOCK>;
     static constexpr int NUM_CONSUMER_WARPS=M_BLOCK*4, INPUT_PIPE_STAGES=4, PRODUCER_BARRIER_ARRIVALS=1;
 
-    template<bool PERSISTENT_GRID=true> 
+    template<bool PERSISTENT_GRID=false>
     __host__ static inline dim3 grid(int N, int M, int K) {
         const int blocks_per_batch = ((N + M_BLOCK*64 - 1)/(M_BLOCK*64)) * 
                                    ((M + N_BLOCK*64 - 1)/(N_BLOCK*64));
         const int total_blocks = BATCH_SIZE * blocks_per_batch;
+        std::cout << total_blocks << std::endl;
         return dim3(std::min(total_blocks, 108)); // Cap grid size for H100 SMs
     }
 
@@ -86,6 +87,7 @@ struct matmul_template {
 
         __device__ static void load(producer_load_args<layout> args) {
             if(warpgroup::warpid() == 0) {
+                printf("tma::expect arrive");
                 tma::expect(args.inputs_arrived, args.input);
                 for(int i = 0; i < M_BLOCK; i++) {
                     const int row = args.common.coord.x + i;
@@ -123,6 +125,7 @@ struct matmul_template {
                                      args.input.b[n]);
                 }
             }
+            printf("compute async wait lane: %d", lineid());
             warpgroup::mma_async_wait();
             if(laneid() == 0) arrive(args.inputs_finished);
         }
@@ -137,7 +140,7 @@ struct matmul_template {
                                    args.state.accum[n]);
                 }
             }
-
+            printf("finish sync");
             warpgroup::sync(0); // Use unified barrier
             
             if(warpgroup::warpid() == 0 && laneid() == 0) {
@@ -149,6 +152,7 @@ struct matmul_template {
                                        {args.common.batch, 0, 
                                         args.common.coord.x, 
                                         col});
+                    printf("store async read wait i: %d", i);
                     tma::store_async_read_wait();
 
                     }
@@ -292,7 +296,7 @@ int main() {
     int device = getenv("DEVICE", 0);
     CUDA_CHECK(cudaSetDevice(device));
 
-    run_benchmark<matmul_template<2,4,8>>(3072, 3072, 16);
+    run_benchmark<matmul_template<2,4,8>>(64, 64, 64);
     // run_benchmark<matmul_template<2,4,8>>(12288, 12288, 16);
     return 0;
 }

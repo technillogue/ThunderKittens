@@ -34,7 +34,7 @@ template<has_##flag_name##_flag T> constexpr int flag_name##_v<T> = T::flag_name
 // How to pad structs to force alignment (set to 1024 by default)
 FLAG_GETTER(FORCE_ALIGN, 1024)
 // Whether to print debug information (set to false by default)
-FLAG_GETTER(DEBUG, 0)
+FLAG_GETTER(DEBUG, 1)
 // How many blocks to colocate per SM.
 FLAG_GETTER(NUM_BLOCKS, 1)
 // How many consumer warps to run per SM.
