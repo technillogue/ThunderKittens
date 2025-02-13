@@ -1,5 +1,26 @@
 #include "kittens.cuh"
 #include "prototype.cuh"
+#include <iostream>
+#include <random>
+#include <cuda_bf16.h>
+#include <omp.h>
+
+
+#define CUDA_CHECK(cond)                                                   \
+  do {                                                                     \
+    cudaError_t err = cond;                                                \
+    if (err != cudaSuccess)                                                \
+    {                                                                      \
+      std::cerr << "[CUDA_CHECK] Cuda error: " << cudaGetErrorString(err) << std::endl; \
+      std::cerr << "code: " << #cond << std::endl;                         \
+      exit(1);                                                             \
+    }                                                                      \
+  } while (false)
+
+int getenv(const char* name, int default_value) {
+  auto value = std::getenv(name);
+  return (value == nullptr || value[0] == '\0') ? default_value : std::stoi(value);
+}
 
 using namespace kittens;
 using namespace kittens::prototype;
@@ -142,11 +163,7 @@ struct matmul_template {
 };
 
 
-constexpr bool NCU = true;
-#include <iostream>
-#include <random>
-#include <cuda_bf16.h>
-#include <omp.h>
+bool NCU = getenv("NCU", 0) != 0;
 
 void cpu_gemm(float* a, float* b, float* c, int B, int N, int M, int K) {
     #pragma omp parallel for collapse(3)
@@ -182,7 +199,6 @@ void inner_run(bf16 *d_A, bf16 *d_B, bf16 *d_C, int B, int N, int M, int K, dim3
 template<typename mmt>
 int run_benchmark(int N, int M, int K) {
     const int B = BATCH_SIZE;
-    cudaError_t cudaStatus;
 
     std::cout << "----- Batch Matrix Multiply [B=" << B << ", N=" << N << ", M=" << M << ", K=" << K << "] -----\n";
 
@@ -229,6 +245,12 @@ int run_benchmark(int N, int M, int K) {
     for(int i = 0; i < (NCU ? 0 : 2); i++) {
         inner_run<mmt>(d_A, d_B, d_C, B, N, M, K, grid, block);
     }
+    // manually check for any errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in kernel launch: " << cudaGetErrorString(error) << std::endl;
+        exit(1);
+    }
 
     std::cout << "warmup\n";
     
@@ -267,6 +289,8 @@ int run_benchmark(int N, int M, int K) {
 
 int main() {
     // Test with different sizes
+    int device = getenv("DEVICE", 0);
+    CUDA_CHECK(cudaSetDevice(device));
 
     run_benchmark<matmul_template<2,4,8>>(3072, 3072, 16);
     // run_benchmark<matmul_template<2,4,8>>(12288, 12288, 16);
