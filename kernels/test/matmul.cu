@@ -245,7 +245,7 @@ int run_benchmark(int N, int M, int K) {
 
     // Launch kernel
     dim3 grid = mmt::grid(N, M, K);
-    dim3 block(kittens::WARP_THREADS * (mmt::NUM_CONSUMER_WARPS + 1));
+    dim3 block(kittens::prototype::detail::NUM_THREADS_v<mmt>);
     cudaFuncSetAttribute(prototype::lcf::kernel<mmt>, cudaFuncAttributeMaxDynamicSharedMemorySize, MAX_SHARED_MEMORY-1024);
 
     // Warmup
