@@ -43,7 +43,7 @@ void kernel(const __grid_constant__ typename lcft::layout::globals globals) {
     );
     constexpr int NUM_CONSUMER_WARPS = detail::NUM_CONSUMER_WARPS_v<lcft>;
     constexpr int NUM_PRODUCER_WARPS = detail::NUM_PRODUCER_WARPS_v<lcft>;
-    
+    printf("everyone is %d",  detail::NUM_WARPS_v<lcft>);
     using everyone = group<detail::NUM_WARPS_v<lcft>>;
     
     extern __shared__ int __shm[];
@@ -89,7 +89,9 @@ void kernel(const __grid_constant__ typename lcft::layout::globals globals) {
             printf("        finish_smem size:                  %llu\n", sizeof(finish_block));
             printf("        dynamic shared memory usage:       %llu\n", sizeof(scratch_alloc_block) + uint64_t(&scratch_smem) - uint64_t(&__shm[0]));
         }
+        printf("before sync %d %d %d %d\n", threadIdx.x, threadIdx.y, threadIdx.z, blockIdx.x);
         everyone::sync(15);
+        printf("sync done\n");
     }
 
     // Initialize semaphores. This is constant for all two-stage producer-consumer kernels.
