@@ -47,6 +47,7 @@ struct matmul_template {
     using layout    = matmul_layout<M_BLOCK, N_BLOCK>;
     using wide_tile = st_bf<64, 64*N_BLOCK>;
     static constexpr int NUM_CONSUMER_WARPS=M_BLOCK*4, INPUT_PIPE_STAGES=4, PRODUCER_BARRIER_ARRIVALS=1;
+    //static constexpr int DEBUG=1;
 
     template<bool PERSISTENT_GRID=false>
     __host__ static inline dim3 grid(int N, int M, int K) {
@@ -58,7 +59,6 @@ struct matmul_template {
     }
 
     __device__ static inline void common_setup(common_setup_args<layout> args) {
-        printf("common setup\n");
         const int Rblocks = (args.globals.C.rows + M_BLOCK*64 - 1) / (M_BLOCK*64);
         const int Cblocks = (args.globals.C.cols + N_BLOCK*64 - 1) / (N_BLOCK*64);
         const int total_blocks_per_batch = Rblocks * Cblocks;
@@ -84,12 +84,10 @@ struct matmul_template {
     struct producer {
         __device__ static void setup(producer_setup_args<layout> args) {
             warpgroup::decrease_registers<40>();
-            printf("prducer setup\n");
         }
 
         __device__ static void load(producer_load_args<layout> args) {
             if(warpgroup::warpid() == 0) {
-                printf("tma::expect arrive\n");
                 tma::expect(args.inputs_arrived, args.input);
                 for(int i = 0; i < M_BLOCK; i++) {
                     const int row = args.common.coord.x + i;
@@ -117,7 +115,6 @@ struct matmul_template {
             warpgroup::increase_registers<232>();
             for (int n = 0; n < N_BLOCK; n++) 
                 zero(args.state.accum[n]);
-            printf("consumer setup done\n");
         }
 
         __device__ static void compute(consumer_compute_args<layout> args) {
@@ -128,7 +125,6 @@ struct matmul_template {
                                      args.input.b[n]);
                 }
             }
-            printf("compute async wait lane: %d\n", laneid());
             warpgroup::mma_async_wait();
             if(laneid() == 0) arrive(args.inputs_finished);
         }
@@ -143,7 +139,7 @@ struct matmul_template {
                                    args.state.accum[n]);
                 }
             }
-            printf("finish sync\n");
+
             warpgroup::sync(0); // Use unified barrier
             
             if(warpgroup::warpid() == 0 && laneid() == 0) {
@@ -155,7 +151,6 @@ struct matmul_template {
                                        {args.common.batch, 0, 
                                         args.common.coord.x, 
                                         col});
-                    printf("store async read wait i: %d", i);
                     tma::store_async_read_wait();
 
                     }
@@ -197,7 +192,7 @@ void inner_run(bf16 *d_A, bf16 *d_B, bf16 *d_C, int B, int N, int M, int K, dim3
     global_layout Bg{d_B, B, nullptr, K, M};
     global_layout Cg{d_C, B, nullptr, N, M};
     globals G{Ag, Bg, Cg};
-    std::cout << "yahoo\n";
+    std::cout << "yahoo " << block.x << "\n";
 
     
     prototype::lcf::kernel<mmt><<<grid, block, MAX_SHARED_MEMORY-1024>>>(G);
@@ -246,6 +241,7 @@ int run_benchmark(int N, int M, int K) {
     // Launch kernel
     dim3 grid = mmt::grid(N, M, K);
     dim3 block(kittens::prototype::detail::NUM_THREADS_v<mmt>);
+    std::cout << kittens::prototype::detail::NUM_THREADS_v<mmt> << std::endl;
     cudaFuncSetAttribute(prototype::lcf::kernel<mmt>, cudaFuncAttributeMaxDynamicSharedMemorySize, MAX_SHARED_MEMORY-1024);
 
     // Warmup
