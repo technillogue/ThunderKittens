@@ -98,6 +98,8 @@ void kernel(const __grid_constant__ typename lcft::layout::globals globals) {
     uint32_t semaphore_bitfield = 0xFFFF0000; // ***_finished phase bits start as 1s, ***_arrived phase bits start as 0s
     common_state common;
 
+    if (laneid() == 0) printf("Warp %d entering %s path\n", warpid(), warpid() >= NUM_CONSUMER_WARPS ? "producer" : "consumer");
+
     if(warpid() >= NUM_CONSUMER_WARPS) { // code path for producer warps
         using producers = group<NUM_PRODUCER_WARPS>;
         if (warpid() == NUM_CONSUMER_WARPS) { // a single warp (in fact a single thread) does these.
@@ -114,6 +116,7 @@ void kernel(const __grid_constant__ typename lcft::layout::globals globals) {
             common_setup_args<L> unif{common, task_iter, num_iters, globals, *scratch_smem};
             lcft::common_setup(unif);
             if(num_iters <= 0) return; // no work to do
+            if (laneid() == 0)printf("warp %d producer task_iter %d num_iters %d\n", warpid(), task_iter, num_iters);
             int input_ring = 0; // tracking which input block is being loaded
             int load_iter;
             lcft::producer::setup({p_state, unif});
@@ -131,6 +134,7 @@ void kernel(const __grid_constant__ typename lcft::layout::globals globals) {
                 input_ring=ring_advance<INPUT_PIPE_STAGES>(input_ring);
             }
             producers::sync(13); // producer warps must finish before consumer warps can proceed
+            if (laneid() == 0)printf("warp %d producer task %d done\n", warpid(), task_iter);
         } // task iter loop
     } // producer warpgroup
     else { // code path for consumer warps
@@ -142,6 +146,7 @@ void kernel(const __grid_constant__ typename lcft::layout::globals globals) {
             common_setup_args<L> unif{common, task_iter, num_iters, globals, *scratch_smem};
             lcft::common_setup(unif);
             if(num_iters <= 0) return; // no work to do
+            if (laneid() == 0)printf("warp %d consumer, task_iter %d, num_iters %d\n", warpid(), task_iter, num_iters);
             int input_ring = 0; // tracking which input block is being loaded
             lcft::consumer::setup({c_state, unif});
 #ifdef CONSUMER_UNROLL
@@ -156,6 +161,7 @@ void kernel(const __grid_constant__ typename lcft::layout::globals globals) {
             consumers::sync(14); // cannot overwrite finish block until all consumer warps are done.
             lcft::consumer::finish({c_state, *finish_smem, finish_finished, unif});
             consumers::sync(14); // cannot overwrite finish block until all consumer warps are done.
+            if (laneid() == 0)printf("warp %d consumer done\n");
         } // task iter loop
     } // consumer warpgroup
 }

@@ -46,8 +46,8 @@ struct matmul_template {
     static constexpr int M_BLOCK = _M_BLOCK, N_BLOCK = _N_BLOCK, SUPER_M = _SUPER_M;
     using layout    = matmul_layout<M_BLOCK, N_BLOCK>;
     using wide_tile = st_bf<64, 64*N_BLOCK>;
-    static constexpr int NUM_CONSUMER_WARPS=M_BLOCK*4, INPUT_PIPE_STAGES=4, PRODUCER_BARRIER_ARRIVALS=1;
-    //static constexpr int DEBUG=1;
+    static constexpr int NUM_CONSUMER_WARPS=M_BLOCK*4, NUM_PRODUCER_WARPS=4, INPUT_PIPE_STAGES=4, PRODUCER_BARRIER_ARRIVALS=1;
+    static constexpr int DEBUG=1;
 
     template<bool PERSISTENT_GRID=false>
     __host__ static inline dim3 grid(int N, int M, int K) {
@@ -139,8 +139,8 @@ struct matmul_template {
                                    args.state.accum[n]);
                 }
             }
-
-            warpgroup::sync(0); // Use unified barrier
+            warpgroup::sync(warpgroup::groupid()+4);
+            // warpgroup::sync(0); // Use unified barrier
             
             if(warpgroup::warpid() == 0 && laneid() == 0) {
                 for(int i = 0; i < N_BLOCK; i++) {
