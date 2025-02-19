@@ -21,7 +21,7 @@ struct matmul_template {
     using wide_tile = st_bf<64, 64*N_BLOCK>;
     static constexpr int NUM_CONSUMER_WARPS=M_BLOCK*4, INPUT_PIPE_STAGES=4, PRODUCER_BARRIER_ARRIVALS=1;
     // Helper functions
-    template<bool PERISISTENT_GRID=true> __host__ static inline dim3 grid(int B, int M, int N, int K) {
+    template<bool PERISISTENT_GRID=false> __host__ static inline dim3 grid(int B, int M, int N, int K) {
         return dim3(PERISISTENT_GRID ? 132 : B*M*N/(M_BLOCK*N_BLOCK*layout::base_tile::num_elements));
     }
       // ThunderKittens template functions
@@ -128,7 +128,7 @@ void cpu_gemm(float* a, float* b, float* c, int B, int M, int N, int K) {
             for (int n_idx = 0; n_idx < N; n_idx++) { // j
                 float sum = 0.0f;
                 for (int k_idx = 0; k_idx < K; k_idx++) { // k
-                    sum += a[b_idx * M * K + m_idx * K + k_idx] * b[b_idx * K * N + k_idx * N + n_idx];
+                    sum += a[b_idx * M * K + m_idx * K + k_idx] * b[b_idx * K * N + n_idx * K + k_idx];
                 }
                 c[b_idx * M * N + m_idx * N + n_idx] = sum;
             }
@@ -157,7 +157,7 @@ int run_benchmark(size_t B, size_t M, size_t N, size_t K) {
 
     // Allocate host memory
     float *h_A = new float[B * M * K];
-    float *h_B = new float[B * K * N];
+    float *h_B = new float[B * N * K];
     float *h_C = new float[B * M * N];
     float *h_C_ref = new float[B * M * N];
 
@@ -265,8 +265,9 @@ int run_benchmark(size_t B, size_t M, size_t N, size_t K) {
     float max_error = 0.0f;
     int error_count = 0;
     for (int i = 0; i < B * M * N; ++i) {
-        float error = std::abs(h_C[i] - h_C_ref[i]);
-        if(error > 1.0) { // large because of bf16 vs fp32 numerics
+        float abs_error = std::abs(h_C[i] - h_C_ref[i]);
+        float error = std::abs(abs_error / h_C_ref[i]);
+        if(error > .01 && abs_error > 0.01) { // large because of bf16 vs fp32 numerics
             int b = i / (M * N), row = i % (M * N) / N, col = i % N;
             if(error_count < 20) std::cout << "Error at batch " << b << " row " << row << " col " << col << ": " << h_C[i] << " != " << h_C_ref[i] << " (ref)" << std::endl;
             else if(error_count == 21) std::cout << "Too many errors to show them all.\n";
