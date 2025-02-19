@@ -128,9 +128,9 @@ void cpu_gemm(float* a, float* b, float* c, int B, int M, int N, int K) {
             for (int n_idx = 0; n_idx < N; n_idx++) { // j
                 float sum = 0.0f;
                 for (int k_idx = 0; k_idx < K; k_idx++) { // k
-                    sum += a[b_idx * M * K + m_idx * K + k_idx] * b[b_idx * K * N + k_idx * K + k_idx];
+                    sum += a[b_idx * M * K + m_idx * K + k_idx] * b[b_idx * K * N + k_idx * N + n_idx];
                 }
-                c[b_idx * M * K + m_idx * N + n_idx] = sum;
+                c[b_idx * M * N + m_idx * N + n_idx] = sum;
             }
         }
     }
