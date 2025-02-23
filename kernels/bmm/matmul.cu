@@ -144,8 +144,8 @@ void cpu_gemm(float* a, float* b, float* c, int B, int M, int N, int K) {
 
 torch::Tensor batch_matmul(torch::Tensor A, torch::Tensor B) {
     TORCH_CHECK(A.size(0) == B.size(0), "Batch size mismatch");
-    TORCH_CHECK(A.size(2) == B.size(1), "Inner dimensions mismatch");
-    uint batch = A.size(0), M = A.size(1), K = A.size(2), N = B.size(2);
+    TORCH_CHECK(A.size(2) == B.size(2), "Inner dimensions mismatch");
+    uint batch = A.size(0), M = A.size(1), K = A.size(2), N = B.size(1);
     torch::Tensor C = torch::empty({batch, M, N}, A.options());
 
     // M_BLOCK, N_BLOCK, SUPER_M
