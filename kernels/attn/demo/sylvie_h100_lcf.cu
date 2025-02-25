@@ -10,7 +10,12 @@ template<int D, int NUM_WORKERS> struct attn_fwd_layout {
     using kv_tile   = st_bf<D==64?192:128, D>;
     using qo_global = kittens::gl<bf16, -1, -1, -1, D, qo_tile>;
     using kv_global = kittens::gl<bf16, -1, -1, -1, D, kv_tile>;
-    struct globals { qo_global O, Q; kv_global K, V; };
+    struct globals {
+        qo_global O, Q; kv_global K, V;
+        // dim3 grid((ATTN_N + qkvo_tile<ATTN_D>::rows*NUM_WORKERS - 1) / (qkvo_tile<ATTN_D>::rows*NUM_WORKERS), ATTN_H, ATTN_B);
+        dim3 grid()  { return dim3(132); } //dim3(Q.batch * ((Q.depth + 3) / 4)); }
+        dim3 block() { return dim3((8+4)*WARP_THREADS); }
+    };
     struct input_block    { kv_tile k, v; };
     struct scratch_block  { qo_tile q[NUM_WORKERS]; };
     struct common_state   { int batch, head, seq, q_start_idx; };
@@ -132,7 +137,7 @@ PYBIND11_MODULE(window_attn, m) {
     m.doc() = "window attention :)";
     using template_t = attn_fwd_template<128>;
     using globals_t = typename template_t::layout::globals;
-    py::bind_kernel<lcf::kernel<template_t>>(m, "attn_fwd", 
-        &globals_t::Q, &globals_t::K, &globals_t::V, &globals_t::O
+    py::bind_kernel<lcf::kernel<template_t>>(m, "attn_fwd",
+        &globals_t::O, &globals_t::Q, &globals_t::K, &globals_t::V
     );
 }
