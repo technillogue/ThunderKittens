@@ -64,7 +64,7 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             int q_idx_base = args.common.q_start_idx + warpgroup::groupid() * layout::qo_tile::rows;
             // Calculate current key positions for this tile
             int k_idx_start = args.iter * layout::kv_tile::rows;
-            int k_idx_end = min(k_idx_start + layout::kv_tile::rows, args.globals.K.rows);
+            int k_idx_end = min(k_idx_start + layout::kv_tile::rows, (int)args.globals.K.rows);
 
 
             // A = Q @ K.T
@@ -85,7 +85,7 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
                      int k_pos = k_idx_start + k_col;
                      // if the key is beyond valid keys or outside window
                      if (k_pos >= k_idx_end || k_pos < window_start || k_pos >= window_end) {
-                        args.state.att_block.tiles[q_row/4][k_col/4].data[q_row%4][k_col%4] = base_types::constants<float>::neg_infty();
+                        args.state.att_block.tiles[q_row/4][k_col/4].data[q_row%4 * layout::kv_tile::cols + k_col%4] = base_types::constants<float>::neg_infty();
                      }
                  }
             }
