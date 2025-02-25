@@ -85,7 +85,8 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
                      int k_pos = k_idx_start + k_col;
                      // if the key is beyond valid keys or outside window
                      if (k_pos >= k_idx_end || k_pos < window_start || k_pos >= window_end) {
-                        args.state.att_block.tiles[q_row/4][k_col/4].data[q_row%4 * layout::kv_tile::cols + k_col%4] = base_types::constants<float>::neg_infty();
+                        float neginf = base_types::constants<float>::neg_infty();
+                        args.state.att_block.tiles[q_row/4][k_col/4].data[q_row%4 * layout::kv_tile::cols + k_col%4] = float2(neginf, neginf);
                      }
                  }
             }
