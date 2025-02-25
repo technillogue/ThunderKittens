@@ -130,7 +130,9 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
 
 PYBIND11_MODULE(window_attn, m) {
     m.doc() = "window attention :)";
-    py::bind_kernel<lcf::kernel<attn_fwd_template<128>>>(m, "attn_fwd",
-        &layout::globals::O, &layout::globals::Q, &layout::globals::K, &layout::globals::V
+    using template_t = attn_fwd_template<128>;
+    using globals_t = typename template_t::layout::globals;
+    py::bind_kernel<lcf::kernel<template_t>>(m, "attn_fwd", 
+        &globals_t::Q, &globals_t::K, &globals_t::V, &globals_t::O
     );
 }
