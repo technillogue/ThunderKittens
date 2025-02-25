@@ -12,7 +12,7 @@ template<int D, int NUM_WORKERS> struct attn_fwd_layout {
     struct globals { qo_global O, Q; kv_global K, V; };
     struct input_block    { kv_tile k, v; };
     struct scratch_block  { qo_tile q[NUM_WORKERS]; };
-    struct common_state   { int batch, head, seq; };
+    struct common_state   { int batch, head, seq, q_start_idx; };
     struct consumer_state {
         rt_fl<16, qo_tile::cols> o_reg;
         col_vec<rt_fl<16, kv_tile::rows>> max_vec, norm_vec;
@@ -21,7 +21,7 @@ template<int D, int NUM_WORKERS> struct attn_fwd_layout {
         rt_bf<16, kv_tile::rows> att_block_mma;
     };
 };
-template<int D> struct attn_fwd_template {
+template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
     static constexpr int NUM_CONSUMER_WARPS = 12, NUM_WORKERS = NUM_CONSUMER_WARPS/4, INPUT_PIPE_STAGES = 2;
     using layout = attn_fwd_layout<D, NUM_WORKERS>;
     __device__ static inline void common_setup(common_setup_args<layout> args) {
@@ -30,6 +30,7 @@ template<int D> struct attn_fwd_template {
         args.common.batch = task_id / (seq_q*args.globals.K.depth); task_id -= args.common.batch * seq_q * args.globals.K.depth;
         args.common.head  = task_id / seq_q;                        task_id -= args.common.head  * seq_q;
         args.common.seq   = task_id;
+        args.common.q_start_idx = task_id * NUM_WORKERS * layout::qo_tile::rows;
         args.num_iters = args.common.batch < args.globals.Q.batch ? (args.globals.K.rows + layout::kv_tile::rows - 1)/(layout::kv_tile::rows) : -1;
     }
     struct producer {
@@ -58,10 +59,39 @@ template<int D> struct attn_fwd_template {
         }
         __device__ static inline void compute(consumer_compute_args<layout> args) {
             constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
+
+            // Calculate current query position
+            int q_idx_base = args.common.q_idx_base + warpgroup::groupid() * layout::qo_tile::rows;
+            // Calculate current key positions for this tile
+            int k_idx_start = args.iter * layout::kv_tile::rows;
+            int k_idx_end = min(k_idx_start + layout::kv_tile::rows, args.globals.K.rows);
+
+
             // A = Q @ K.T
             warpgroup::mm_ABt(args.state.att_block, args.scratch.q[warpgroup::groupid()], args.input.k);
             mul(args.state.max_vec_last_scaled, args.state.max_vec, TEMPERATURE_SCALE);
             warpgroup::mma_async_wait();
+            // Apply sliding window mask, each row is a query position
+            // not sure why 16
+            #pragma unroll
+            for (int q_row = 0; q_row < 16; q_row++) {
+                 int q_pos = q_idx_base + q_row;
+                 // window boundaries
+                 int window_start = max(0, q_pos - WINDOW_SIZE/2);
+                 int window_end = min((int)args.globals.K.rows, q_pos + WINDOW_SIZE/2 + 1);
+                 // for each key in the current tile
+                 #pragma unroll
+                 for (int k_col = 0; k_col < layout::kv_tile::rows; k_col++) {
+                     int k_pos = k_idx_start + k_col;
+                     // if the key is beyond valid keys or outside window
+                     if (k_pos >= k_idx_end || k_pos < window_start || k_pos >= window_end) {
+                        args.state.att_block.tiles[q_row/4][k_col/4].data[q_row%4][k_col%4] = base_types::constants<float>::neg_infty();
+                     }
+                 }
+            }
+
+
+
             // softmax
             right_fill(args.state.att_block, args.state.att_block, args.globals.K.rows - args.iter*layout::kv_tile::rows, base_types::constants<float>::neg_infty());
             row_max(args.state.max_vec, args.state.att_block, args.state.max_vec); // accumulate onto the max_vec
