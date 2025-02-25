@@ -61,7 +61,7 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
 
             // Calculate current query position
-            int q_idx_base = args.common.q_idx_base + warpgroup::groupid() * layout::qo_tile::rows;
+            int q_idx_base = args.common.q_start_idx + warpgroup::groupid() * layout::qo_tile::rows;
             // Calculate current key positions for this tile
             int k_idx_start = args.iter * layout::kv_tile::rows;
             int k_idx_end = min(k_idx_start + layout::kv_tile::rows, args.globals.K.rows);
