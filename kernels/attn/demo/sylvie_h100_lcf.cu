@@ -1,5 +1,6 @@
 #include "kittens.cuh"
 #include "prototype.cuh"
+#include "pyutils/pyutils.cuh"
 
 using namespace kittens;
 using namespace kittens::prototype;
@@ -92,7 +93,6 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             }
 
 
-
             // softmax
             right_fill(args.state.att_block, args.state.att_block, args.globals.K.rows - args.iter*layout::kv_tile::rows, base_types::constants<float>::neg_infty());
             row_max(args.state.max_vec, args.state.att_block, args.state.max_vec); // accumulate onto the max_vec
@@ -128,4 +128,9 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
 };
 // kernel is kittens::prototype::lcf::kernel<attn_fwd_template<HEAD_DIM>>;
 
-#include "h100_lcf_harness.impl"
+PYBIND11_MODULE(window_attn, m) {
+    m.doc() = "window attention :)";
+    py::bind_kernel<lcf::kernel<attn_fwd_template<128>>>(m, "attn_fwd",
+        &layout::globals::O, &layout::globals::Q, &layout::globals::K, &layout::globals::V
+    );
+}
