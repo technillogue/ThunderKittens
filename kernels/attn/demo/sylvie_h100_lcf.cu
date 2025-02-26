@@ -66,36 +66,41 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
         __device__ static inline void compute(consumer_compute_args<layout> args) {
             constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
 
-            // Calculate current query position
-            int q_idx_base = args.common.q_start_idx + warpgroup::groupid() * layout::qo_tile::rows;
-            // Calculate current key positions for this tile
-            int k_idx_start = args.iter * layout::kv_tile::rows;
-            int k_idx_end = min(k_idx_start + layout::kv_tile::rows, (int)args.globals.K.rows);
-
+            // // Calculate current query position
+            // int q_idx_base = args.common.q_start_idx + warpgroup::groupid() * layout::qo_tile::rows;
+            // // Calculate current key positions for this tile
+            // int k_idx_start = args.iter * layout::kv_tile::rows;
+            // int k_idx_end = min(k_idx_start + layout::kv_tile::rows, (int)args.globals.K.rows);
 
             // A = Q @ K.T
             warpgroup::mm_ABt(args.state.att_block, args.scratch.q[warpgroup::groupid()], args.input.k);
             mul(args.state.max_vec_last_scaled, args.state.max_vec, TEMPERATURE_SCALE);
             warpgroup::mma_async_wait();
-            // Apply sliding window mask, each row is a query position
-            // not sure why 16
-            #pragma unroll
-            for (int q_row = 0; q_row < 16; q_row++) {
-                 int q_pos = q_idx_base + q_row;
-                 // window boundaries
-                 int window_start = max(0, q_pos - WINDOW_SIZE/2);
-                 int window_end = min((int)args.globals.K.rows, q_pos + WINDOW_SIZE/2 + 1);
-                 // for each key in the current tile
-                 #pragma unroll
-                 for (int k_col = 0; k_col < layout::kv_tile::rows; k_col++) {
-                     int k_pos = k_idx_start + k_col;
-                     // if the key is beyond valid keys or outside window
-                     if (k_pos >= k_idx_end || k_pos < window_start || k_pos >= window_end) {
-                        float neginf = base_types::constants<float>::neg_infty();
-                        args.state.att_block.tiles[q_row/4][k_col/4].data[q_row%4 * layout::kv_tile::cols + k_col%4] = float2(neginf, neginf);
-                     }
-                 }
-            }
+
+            float neginf = base_types::constants<float>::neg_infty();
+            // i'm just yolo assuming we actually want to apply a centered window which may be wrong?
+            tril(args.state.att_block, args.state.att_block, WINDOW_SIZE/2, neginf);
+            tril(args.state.att_block, args.state.att_block, -WINDOW_SIZE/2, neginf);
+
+            // // Apply sliding window mask, each row is a query position
+            // // not sure why 16
+            // #pragma unroll
+            // for (int q_row = 0; q_row < 16; q_row++) {
+            //      int q_pos = q_idx_base + q_row;
+            //      // window boundaries
+            //      int window_start = max(0, q_pos - WINDOW_SIZE/2);
+            //      int window_end = min((int)args.globals.K.rows, q_pos + WINDOW_SIZE/2 + 1);
+            //      // for each key in the current tile
+            //      #pragma unroll
+            //      for (int k_col = 0; k_col < layout::kv_tile::rows; k_col++) {
+            //          int k_pos = k_idx_start + k_col;
+            //          // if the key is beyond valid keys or outside window
+            //          if (k_pos >= k_idx_end || k_pos < window_start || k_pos >= window_end) {
+            //             float neginf = base_types::constants<float>::neg_infty();
+            //             args.state.att_block.tiles[q_row/4][k_col/4].data[q_row%4 * layout::kv_tile::cols + k_col%4] = float2(neginf, neginf);
+            //          }
+            //      }
+            // }
 
 
             // softmax
