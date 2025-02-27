@@ -67,12 +67,17 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
         __device__ static inline void compute(consumer_compute_args<layout> args) {
             constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
 
+            // int qidx = (args.common.seq*NUM_WORKERS+warpgroup::groupid())*layout::qo_tile::rows;
+            // int kvidx = args.iter*layout::kv_tile::rows;
+
             // figure out where to apply window mask (more explicitly)
             int query_block_idx = args.common.seq * NUM_WORKERS;
             int query_warp_block_offset = query_block_idx + warpgroup::groupid();
             int query_start_position = query_warp_block_offset * layout::qo_tile::rows;
             int key_start_position = args.iter * layout::kv_tile::rows;
 
+            // kvidx - qidx gives the (negative) offset based on block
+            // 16 * (warpgroup::warpid() % 4) gives the offset based on the warp
             int warp_index_in_group = warpgroup::warpid() % 4;
             int warp_row_offset = 16 * warp_index_in_group;
 
@@ -94,6 +99,18 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             warpgroup::mma_async_wait();
 
             float neginf = base_types::constants<float>::neg_infty();
+
+            // from causal only version
+            // if (causal) {
+            //     // if qidx - kvidx is less than the number of columns, this tile passes the diagonal
+            //     if (qidx - kvidx < layout::qo_tile::cols) {
+            //         // blocks are wider than they are tall, so we have mulitple blocks on the diagonal
+            //         // kvidx - qidx gives the (negative) offset based on block
+            //         // 16 * (warpgroup::warpid() % 4) gives the offset based on the warp
+            //         tril(args.state.att_block, args.state.att_block, kvidx - qidx - 16 * (warpgroup::warpid() % 4), base_types::constants<float>::neg_infty());
+            //     }
+            // }
+
             // apply causal mask
             tril(args.state.att_block, args.state.att_block, diagonal_offset, neginf);
             // apply window
