@@ -71,8 +71,9 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             // int kvidx = args.iter*layout::kv_tile::rows;
 
             // figure out where to apply window mask (more explicitly)
-            int query_block_idx = args.common.seq * NUM_WORKERS;
-            int query_warp_block_offset = query_block_idx + warpgroup::groupid();
+            int query_block_idx = args.common.seq * NUM_WORKERS; // seq tile (Q) times 3
+            int query_warp_block_offset = query_block_idx + warpgroup::groupid(); // warp position within warpgroup
+            // i think this is the total number of tiles before us, times row count
             int query_start_position = query_warp_block_offset * layout::qo_tile::rows;
             int key_start_position = args.iter * layout::kv_tile::rows;
 
@@ -83,9 +84,10 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
 
             // diagonal starting row relative to current tile
             int diagonal_offset = key_start_position - query_start_position - warp_row_offset;
+            int window_start_offset = diagonal_offset - WINDOW_SIZE + 1;
 
             bool completely_future = key_start_position > query_start_position;
-            bool completely_past = key_start_position + layout::kv_tile::rows < query_start_position - WINDOW_SIZE;
+            bool completely_past = key_start_position + layout::kv_tile::rows <= query_start_position - WINDOW_SIZE;
 
             // we can skip these tiles! we didn't even need to load them
             if (completely_future || completely_past) {
@@ -110,11 +112,14 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             //         tril(args.state.att_block, args.state.att_block, kvidx - qidx - 16 * (warpgroup::warpid() % 4), base_types::constants<float>::neg_infty());
             //     }
             // }
-
-            // apply causal mask
-            tril(args.state.att_block, args.state.att_block, diagonal_offset, neginf);
-            // apply window
-            triu(args.state.att_block, args.state.att_block, diagonal_offset-WINDOW_SIZE+1, neginf);
+            bool diagonal_passes_through_tile = diagonal_offset > -layout::qo_tile::rows;
+            bool window_start_passes_through_tile = window_start_offset < -layout::kv_tile::cols;
+            if (diagonal_passes_through_tile || window_start_passes_through_tile) {
+                // apply causal mask
+                tril(args.state.att_block, args.state.att_block, diagonal_offset, neginf);
+                // apply window
+                // triu(args.state.att_block, args.state.att_block, window_start_offset, neginf);
+            }
 
             // softmax
             right_fill(args.state.att_block, args.state.att_block, args.globals.K.rows - args.iter*layout::kv_tile::rows, neginf);
