@@ -19,7 +19,7 @@ template<int D, int NUM_WORKERS> struct attn_fwd_layout {
     };
     struct input_block    { kv_tile k, v; };
     struct scratch_block  { qo_tile q[NUM_WORKERS]; };
-    struct common_state   { int batch, head, seq, q_start_idx; };
+    struct common_state   { int batch, head, seq; };
     struct consumer_state {
         rt_fl<16, qo_tile::cols> o_reg;
         col_vec<rt_fl<16, kv_tile::rows>> max_vec, norm_vec;
@@ -38,7 +38,6 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
         args.common.batch = task_id / (seq_q*args.globals.K.depth); task_id -= args.common.batch * seq_q * args.globals.K.depth;
         args.common.head  = task_id / seq_q;                        task_id -= args.common.head  * seq_q;
         args.common.seq   = task_id;
-        args.common.q_start_idx = task_id * NUM_WORKERS * layout::qo_tile::rows;
         args.num_iters = args.common.batch < args.globals.Q.batch ? (args.globals.K.rows + layout::kv_tile::rows - 1)/(layout::kv_tile::rows) : -1;
     }
     struct producer {
@@ -68,11 +67,26 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
         __device__ static inline void compute(consumer_compute_args<layout> args) {
             constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
 
-            // // Calculate current query position
-            // int q_idx_base = args.common.q_start_idx + warpgroup::groupid() * layout::qo_tile::rows;
-            // // Calculate current key positions for this tile
-            // int k_idx_start = args.iter * layout::kv_tile::rows;
-            // int k_idx_end = min(k_idx_start + layout::kv_tile::rows, (int)args.globals.K.rows);
+            // figure out where to apply window mask (more explicitly)
+            int query_block_idx = args.common.seq * NUM_WORKERS;
+            int query_warp_block_offset = query_block_idx + warpgroup::groupid();
+            int query_start_position = query_warp_block_offset * layout::qo_tile::rows;
+            int key_start_position = args.iter * layout::kv_tile::rows;
+
+            int warp_index_in_group = warpgroup::warpid() % 4;
+            int warp_row_offset = 16 * warp_index_in_group;
+
+            // diagonal starting row relative to current tile
+            int diagonal_offset = key_start_position - query_start_position - warp_row_offset;
+
+            bool completely_future = key_start_position > query_start_position;
+            bool completely_past = key_start_position + layout::kv_tile::rows < query_start_position - WINDOW_SIZE;
+
+            // we can skip these tiles! we didn't even need to load them
+            if (completely_future || completely_past) {
+                if(laneid() == 0) arrive(args.inputs_finished);
+                return;
+            }
 
             // A = Q @ K.T
             warpgroup::mm_ABt(args.state.att_block, args.scratch.q[warpgroup::groupid()], args.input.k);
@@ -80,30 +94,10 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             warpgroup::mma_async_wait();
 
             float neginf = base_types::constants<float>::neg_infty();
-            // // i'm just yolo assuming we actually want to apply a centered window which may be wrong?
-            tril(args.state.att_block, args.state.att_block, 0, neginf);
-            triu(args.state.att_block, args.state.att_block, -WINDOW_SIZE, neginf);
-
-            // // Apply sliding window mask, each row is a query position
-            // // not sure why 16
-            // #pragma unroll
-            // for (int q_row = 0; q_row < 16; q_row++) {
-            //      int q_pos = q_idx_base + q_row;
-            //      // window boundaries
-            //      int window_start = max(0, q_pos - WINDOW_SIZE/2);
-            //      int window_end = min((int)args.globals.K.rows, q_pos + WINDOW_SIZE/2 + 1);
-            //      // for each key in the current tile
-            //      #pragma unroll
-            //      for (int k_col = 0; k_col < layout::kv_tile::rows; k_col++) {
-            //          int k_pos = k_idx_start + k_col;
-            //          // if the key is beyond valid keys or outside window
-            //          if (k_pos >= k_idx_end || k_pos < window_start || k_pos >= window_end) {
-            //             float neginf = base_types::constants<float>::neg_infty();
-            //             args.state.att_block.tiles[q_row/4][k_col/4].data[q_row%4 * layout::kv_tile::cols + k_col%4] = float2(neginf, neginf);
-            //          }
-            //      }
-            // }
-
+            // apply causal mask
+            tril(args.state.att_block, args.state.att_block, diagonal_offset, neginf);
+            // apply window
+            triu(args.state.att_block, args.state.att_block, diagonal_offset-WINDOW_SIZE+1, neginf);
 
             // softmax
             right_fill(args.state.att_block, args.state.att_block, args.globals.K.rows - args.iter*layout::kv_tile::rows, neginf);
