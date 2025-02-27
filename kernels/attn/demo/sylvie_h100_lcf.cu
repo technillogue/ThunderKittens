@@ -116,10 +116,12 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             bool window_start_passes_through_tile = window_start_offset < -layout::kv_tile::cols;
             //print debug info
             if (laneid() == 0) {
-                printf("query_block_idx: %d, query_warp_block_offset: %d\n", query_block_idx, query_warp_block_offset);
-                printf("query_start_position: %d, key_start_position: %d\n", query_start_position, key_start_position);
-                printf("diagonal_offset: %d, window_start_offset: %d\n", diagonal_offset, window_start_offset);
-                printf("diagonal_passes_through_tile: %d, window_start_passes_through_tile: %d\n", diagonal_passes_through_tile, window_start_passes_through_tile);
+                // printf("query_block_idx: %d, query_warp_block_offset: %d\n", query_block_idx, query_warp_block_offset);
+                // printf("query_start_position: %d, key_start_position: %d\n", query_start_position, key_start_position);
+                // printf("diagonal_offset: %d, window_start_offset: %d\n", diagonal_offset, window_start_offset);
+                // printf("diagonal_passes_through_tile: %d, window_start_passes_through_tile: %d\n", diagonal_passes_through_tile, window_start_passes_through_tile);
+                // need a single print statement
+                printf("query_block_idx: %d, query_warp_block_offset: %d, query_start_position: %d, key_start_position: %d, diagonal_offset: %d, window_start_offset: %d, diagonal_passes_through_tile: %d, window_start_passes_through_tile: %d\n", query_block_idx, query_warp_block_offset, query_start_position, key_start_position, diagonal_offset, window_start_offset, diagonal_passes_through_tile, window_start_passes_through_tile);
             }
 
             if (diagonal_passes_through_tile || window_start_passes_through_tile) {
