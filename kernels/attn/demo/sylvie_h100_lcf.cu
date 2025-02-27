@@ -14,7 +14,8 @@ template<int D, int NUM_WORKERS> struct attn_fwd_layout {
         qo_global O, Q; kv_global K, V;
         // dim3 grid((ATTN_N + qkvo_tile<ATTN_D>::rows*NUM_WORKERS - 1) / (qkvo_tile<ATTN_D>::rows*NUM_WORKERS), ATTN_H, ATTN_B);
         dim3 grid()  { return dim3(132); } //dim3(Q.batch * ((Q.depth + 3) / 4)); }
-        dim3 block() { return dim3((8+4)*WARP_THREADS); }
+        dim3 block() { return dim3((12+4)*WARP_THREADS); }
+        int dynamic_shared_memory() { return MAX_SHARED_MEMORY - 2000; }
     };
     struct input_block    { kv_tile k, v; };
     struct scratch_block  { qo_tile q[NUM_WORKERS]; };
@@ -28,6 +29,7 @@ template<int D, int NUM_WORKERS> struct attn_fwd_layout {
     };
 };
 template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
+    static constexpr int DEBUG=1;
     static constexpr int NUM_CONSUMER_WARPS = 12, NUM_WORKERS = NUM_CONSUMER_WARPS/4, INPUT_PIPE_STAGES = 2;
     using layout = attn_fwd_layout<D, NUM_WORKERS>;
     __device__ static inline void common_setup(common_setup_args<layout> args) {
@@ -78,9 +80,9 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             warpgroup::mma_async_wait();
 
             float neginf = base_types::constants<float>::neg_infty();
-            // i'm just yolo assuming we actually want to apply a centered window which may be wrong?
-            tril(args.state.att_block, args.state.att_block, WINDOW_SIZE/2, neginf);
-            tril(args.state.att_block, args.state.att_block, -WINDOW_SIZE/2, neginf);
+            // // i'm just yolo assuming we actually want to apply a centered window which may be wrong?
+            tril(args.state.att_block, args.state.att_block, 0, neginf);
+            triu(args.state.att_block, args.state.att_block, -WINDOW_SIZE, neginf);
 
             // // Apply sliding window mask, each row is a query position
             // // not sure why 16
@@ -104,7 +106,7 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
 
 
             // softmax
-            right_fill(args.state.att_block, args.state.att_block, args.globals.K.rows - args.iter*layout::kv_tile::rows, base_types::constants<float>::neg_infty());
+            right_fill(args.state.att_block, args.state.att_block, args.globals.K.rows - args.iter*layout::kv_tile::rows, neginf);
             row_max(args.state.max_vec, args.state.att_block, args.state.max_vec); // accumulate onto the max_vec
             mul(args.state.max_vec_scaled, args.state.max_vec, TEMPERATURE_SCALE);
             mul(args.state.att_block, args.state.att_block, TEMPERATURE_SCALE);
