@@ -114,7 +114,7 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             // }
             bool diagonal_passes_through_tile = diagonal_offset > -layout::qo_tile::rows;
             bool tile_after_window_start = window_start_offset < -layout::qo_tile::rows;
-            if (laneid() == 0 && DEBUG) {
+            if (laneid() == 0 && threadIdx.x == 0 && blockIdx.x == 0 && DEBUG) {
                printf(
                    "query_block_idx: %d, query_warp_block_offset: %d, query_start_position: %d, key_start_position: %d, diagonal_offset: %d, tile_after_window_start : %d, diagonal_passes_through_tile: %d, window_start_passes_through_tile: %d\n",
                    query_block_idx, query_warp_block_offset, query_start_position, key_start_position, diagonal_offset, window_start_offset, diagonal_passes_through_tile, tile_after_window_start
@@ -129,6 +129,15 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
 
             // softmax
             right_fill(args.state.att_block, args.state.att_block, args.globals.K.rows - args.iter*layout::kv_tile::rows, neginf);
+            // print entire matrix
+            if(DEBUG && threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+                for (int i = 0; i < 16; i++) {
+                    for (int j = 0; j < layout::kv_tile::rows; j++) {
+                        printf("%f ", args.state.att_block[(i, j)]);
+                    }
+                    printf("\n");
+                }
+            }
             row_max(args.state.max_vec, args.state.att_block, args.state.max_vec); // accumulate onto the max_vec
             mul(args.state.max_vec_scaled, args.state.max_vec, TEMPERATURE_SCALE);
             mul(args.state.att_block, args.state.att_block, TEMPERATURE_SCALE);
