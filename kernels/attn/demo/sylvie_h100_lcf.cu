@@ -84,7 +84,7 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
 
             // diagonal starting row relative to current tile
             int diagonal_offset = key_start_position - query_start_position - warp_row_offset;
-            int window_start_offset = diagonal_offset - WINDOW_SIZE + 1;
+            int window_start_offset = diagonal_offset + WINDOW_SIZE;
 
             bool completely_future = key_start_position > query_start_position;
             bool completely_past = key_start_position + layout::kv_tile::rows <= query_start_position - WINDOW_SIZE;
@@ -113,22 +113,18 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             //     }
             // }
             bool diagonal_passes_through_tile = diagonal_offset > -layout::qo_tile::rows;
-            bool window_start_passes_through_tile = window_start_offset < -layout::kv_tile::cols;
-            //print debug info
-            if (laneid() == 0) {
-                // printf("query_block_idx: %d, query_warp_block_offset: %d\n", query_block_idx, query_warp_block_offset);
-                // printf("query_start_position: %d, key_start_position: %d\n", query_start_position, key_start_position);
-                // printf("diagonal_offset: %d, window_start_offset: %d\n", diagonal_offset, window_start_offset);
-                // printf("diagonal_passes_through_tile: %d, window_start_passes_through_tile: %d\n", diagonal_passes_through_tile, window_start_passes_through_tile);
-                // need a single print statement
-                printf("query_block_idx: %d, query_warp_block_offset: %d, query_start_position: %d, key_start_position: %d, diagonal_offset: %d, window_start_offset: %d, diagonal_passes_through_tile: %d, window_start_passes_through_tile: %d\n", query_block_idx, query_warp_block_offset, query_start_position, key_start_position, diagonal_offset, window_start_offset, diagonal_passes_through_tile, window_start_passes_through_tile);
-
+            bool tile_after_window_start = window_start_offset < -layout::qo_tile::rows;
+            if (laneid() == 0 && DEBUG) {
+               printf(
+                   "query_block_idx: %d, query_warp_block_offset: %d, query_start_position: %d, key_start_position: %d, diagonal_offset: %d, tile_after_window_start : %d, diagonal_passes_through_tile: %d, window_start_passes_through_tile: %d\n",
+                   query_block_idx, query_warp_block_offset, query_start_position, key_start_position, diagonal_offset, window_start_offset, diagonal_passes_through_tile, tile_after_window_start
+               );
             }
             // apply causal mask
             if (diagonal_passes_through_tile)
                 tril(args.state.att_block, args.state.att_block, diagonal_offset, neginf);
             // apply window
-            if (window_start_passes_through_tile)
+            if (tile_after_window_start)
                 triu(args.state.att_block, args.state.att_block, window_start_offset, neginf);
 
             // softmax
