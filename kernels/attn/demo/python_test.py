@@ -24,12 +24,10 @@ def create_sliding_window_mask(seq_len: int, window_size: int):
         Tensor of shape [seq_len, seq_len] with True for positions within the window
     """
     mask = torch.zeros(seq_len, seq_len, dtype=torch.bool)
-    half_window = window_size // 2
     
     for i in range(seq_len):
         window_start = max(0, i - window_size)
-        window_end = min(seq_len, i + half_window + 1)
-        mask[i, window_start:i+1] = True
+        mask[window_start:i+1] = True
     
     return mask
 
