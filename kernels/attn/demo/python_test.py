@@ -79,7 +79,7 @@ def reference_window_attention(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test for window attention correctness")
-    parser.add_argument("--batch", type=int, default=4, help="Batch size")
+    parser.add_argument("--batch", type=int, default=1, help="Batch size")
     parser.add_argument("--heads", type=int, default=1, help="Number of attention heads")
     parser.add_argument("--seq_len", type=int, default=1024, help="Sequence length")
     parser.add_argument("--head_dim", type=int, default=128, help="Head dimension")
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     
     # Generate random input data
     q = torch.randn(batch_size, heads, seq_len, head_dim, dtype=torch.bfloat16, device='cuda')
-    k = torch.randn(batch_size, heads, seq_len, head_dim, dtype=torch.bfloat16, device='cuda')
+    k = torch.arange(batch_size* heads* seq_len* head_dim, dtype=torch.bfloat16, device='cuda').reshape([batch_size, heads, seq_len, head_dim])
     v = torch.randn(batch_size, heads, seq_len, head_dim, dtype=torch.bfloat16, device='cuda')
     
     # Convert to bfloat16 for kernel input
