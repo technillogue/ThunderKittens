@@ -122,14 +122,14 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
                 // printf("diagonal_passes_through_tile: %d, window_start_passes_through_tile: %d\n", diagonal_passes_through_tile, window_start_passes_through_tile);
                 // need a single print statement
                 printf("query_block_idx: %d, query_warp_block_offset: %d, query_start_position: %d, key_start_position: %d, diagonal_offset: %d, window_start_offset: %d, diagonal_passes_through_tile: %d, window_start_passes_through_tile: %d\n", query_block_idx, query_warp_block_offset, query_start_position, key_start_position, diagonal_offset, window_start_offset, diagonal_passes_through_tile, window_start_passes_through_tile);
-            }
 
-            if (diagonal_passes_through_tile || window_start_passes_through_tile) {
-                // apply causal mask
-                tril(args.state.att_block, args.state.att_block, diagonal_offset, neginf);
-                // apply window
-                triu(args.state.att_block, args.state.att_block, window_start_offset, neginf);
             }
+            // apply causal mask
+            if (diagonal_passes_through_tile)
+                tril(args.state.att_block, args.state.att_block, diagonal_offset, neginf);
+            // apply window
+            if (window_start_passes_through_tile)
+                triu(args.state.att_block, args.state.att_block, window_start_offset, neginf);
 
             // softmax
             right_fill(args.state.att_block, args.state.att_block, args.globals.K.rows - args.iter*layout::kv_tile::rows, neginf);
