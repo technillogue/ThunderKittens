@@ -64,7 +64,8 @@ template<int D=128, int WINDOW_SIZE = 256> struct attn_fwd_template {
             warpgroup::sync(warpgroup::groupid());
         }
         __device__ static inline void compute(consumer_compute_args<layout> args) {
-            // from causal mask: 
+            constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
+
             // int qidx = (args.common.seq*NUM_WORKERS+warpgroup::groupid())*layout::qo_tile::rows;
             // int kvidx = args.iter*layout::kv_tile::rows;
 
