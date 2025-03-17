@@ -19,8 +19,8 @@ NVCCFLAGS+= -x cu -lrt -lpthread -ldl -DKITTENS_HOPPER -arch=sm_90a -lcuda -lcud
 NVCCFLAGS+=$(shell python3 -m pybind11 --includes) $(shell python3-config --ldflags) -shared -fPIC -lpython3.10
 NVCCFLAGS+=-g -G -dopt=on
 # MVCCFLAGS+= -DKITTENS_H100 -arch=sm_90a
-TARGET=window_attn
-SRC=sylvie_h100_lcf.cu
+TARGET=attn_fwd_pybind
+SRC=sylvie_h100_lcf_2.cu
 
 endif
 
