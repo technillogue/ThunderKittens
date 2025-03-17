@@ -5,9 +5,9 @@
 using namespace kittens;
 using namespace kittens::prototype;
 using namespace kittens::prototype::lcf;
-template<int D, int NUM_WORKERS> struct attn_fwd_layout {
-    using qo_tile   = st_bf<64, D>;
-    using kv_tile   = st_bf<D==64?192:128, D>;
+template<int D=128, int NUM_WORKERS=3> struct attn_fwd_layout {
+    using qo_tile   = st_bf<64, D>; // 64x128
+    using kv_tile   = st_bf<D==64?192:128, D>; // 128x128
     using qo_global = kittens::gl<bf16, -1, -1, -1, D, qo_tile>;
     using kv_global = kittens::gl<bf16, -1, -1, -1, D, kv_tile>;
     struct globals {
@@ -27,7 +27,7 @@ template<int D, int NUM_WORKERS> struct attn_fwd_layout {
         rt_bf<16, kv_tile::rows> att_block_mma;
     };
 };
-template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
+template<int D=128, int WINDOW_SIZE = 256> struct attn_fwd_template {
     static constexpr int DEBUG=1;
     static constexpr int NUM_CONSUMER_WARPS = 12, NUM_WORKERS = NUM_CONSUMER_WARPS/4, INPUT_PIPE_STAGES = 2;
     using layout = attn_fwd_layout<D, NUM_WORKERS>;
@@ -64,25 +64,21 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
             warpgroup::sync(warpgroup::groupid());
         }
         __device__ static inline void compute(consumer_compute_args<layout> args) {
-            constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
-
+            // from causal mask: 
             // int qidx = (args.common.seq*NUM_WORKERS+warpgroup::groupid())*layout::qo_tile::rows;
             // int kvidx = args.iter*layout::kv_tile::rows;
 
-            // figure out where to apply window mask (more explicitly)
-            int query_block_idx = args.common.seq * NUM_WORKERS; // seq tile (Q) times 3
+            // figure out where to apply window mask
+            int query_block_idx = args.common.seq * NUM_WORKERS;
             int query_warp_block_offset = query_block_idx + warpgroup::groupid(); // warp position within warpgroup
-            // i think this is the total number of tiles before us, times row count
             int query_start_position = query_warp_block_offset * layout::qo_tile::rows;
             int key_start_position = args.iter * layout::kv_tile::rows;
 
-            // kvidx - qidx gives the (negative) offset based on block
-            // 16 * (warpgroup::warpid() % 4) gives the offset based on the warp
             int warp_index_in_group = warpgroup::warpid() % 4;
             int warp_row_offset = 16 * warp_index_in_group;
 
-            // diagonal starting row relative to current tile
             int diagonal_offset = key_start_position - query_start_position - warp_row_offset;
+            // auren thinks query_start_position - key_start_position + warp_row_offset;
             int window_start_offset = diagonal_offset + WINDOW_SIZE;
 
             bool completely_future = key_start_position > query_start_position;
@@ -94,6 +90,10 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
                 return;
             }
 
+            bool diagonal_passes_through_tile = query_start_position - key_start_position < layout::kv_tile::rows;
+            bool tile_after_window_start = query_start_position - key_start_position >= layout::kv_tile::rows - WINDOW_SIZE;
+
+
             // A = Q @ K.T
             warpgroup::mm_ABt(args.state.att_block, args.scratch.q[warpgroup::groupid()], args.input.k);
             mul(args.state.max_vec_last_scaled, args.state.max_vec, TEMPERATURE_SCALE);
@@ -101,29 +101,11 @@ template<int D, int WINDOW_SIZE = 256> struct attn_fwd_template {
 
             float neginf = base_types::constants<float>::neg_infty();
 
-            // from causal only version
-            // if (causal) {
-            //     // if qidx - kvidx is less than the number of columns, this tile passes the diagonal
-            //     if (qidx - kvidx < layout::qo_tile::cols) {
-            //         // blocks are wider than they are tall, so we have mulitple blocks on the diagonal
-            //         // kvidx - qidx gives the (negative) offset based on block
-            //         // 16 * (warpgroup::warpid() % 4) gives the offset based on the warp
-            //         tril(args.state.att_block, args.state.att_block, kvidx - qidx - 16 * (warpgroup::warpid() % 4), base_types::constants<float>::neg_infty());
-            //     }
-            // }
-            bool diagonal_passes_through_tile = diagonal_offset > -layout::qo_tile::rows;
-            bool tile_after_window_start = window_start_offset < -layout::qo_tile::rows;
-            if (laneid() == 0 && threadIdx.x % 2 == 0 && blockIdx.x % 4 == 0 && DEBUG) {
-               printf(
-                   "query_block_idx: %d, query_warp_block_offset: %d, query_start_position: %d, key_start_position: %d, warp_index_in_group: %d, diagonal_offset: %d, window_start_offset: %d, diagonal_passes_through_tile: %d, tile_after_window_start: %d\n",
-                   query_block_idx, query_warp_block_offset, query_start_position, key_start_position, warp_index_in_group, diagonal_offset, window_start_offset, diagonal_passes_through_tile, tile_after_window_start
-               );
-            }
             // apply causal mask
             if (diagonal_passes_through_tile)
                 tril(args.state.att_block, args.state.att_block, diagonal_offset, neginf);
             // apply window
-            if (tile_after_window_start)
+            if (tile_after_window_start) // window diagonal passes through tile
                 triu(args.state.att_block, args.state.att_block, window_start_offset, neginf);
 
             // softmax
