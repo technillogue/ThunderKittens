@@ -94,7 +94,7 @@ template<int D, bool causal, bool window, int WINDOW_SIZE = 256> struct attn_fwd
             * causal is True and K/V index is greater than Q index
             * which happens when args.iter*layout::kv_tile::rows > args.common.seq*NUM_WORKERS+warpgroup::groupid()
             */
-            if ((!causal || kvidx <= qidx) || !window || (qidx - kvidx) < WINDOW_SIZE) {
+            if ((!causal || kvidx <= qidx) || (!window || (qidx - kvidx) < WINDOW_SIZE)) {
                 constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
                 // A = Q @ K.T
                 warpgroup::mm_ABt(args.state.att_block, args.scratch.q[warpgroup::groupid()], args.input.k);
@@ -154,13 +154,19 @@ template<int D, bool causal, bool window, int WINDOW_SIZE = 256> struct attn_fwd
 
 PYBIND11_MODULE(attn_fwd_pybind, m) {
     m.doc() = "TK Attention Forward Demo";
-    py::bind_kernel<kittens::prototype::lcf::kernel<attn_fwd_template<128, false>>>(m, "fwd_128_noncausal",
+    py::bind_kernel<kittens::prototype::lcf::kernel<attn_fwd_template<128, false, false>>>(m, "fwd_128_noncausal",
         &attn_fwd_layout<128, 3>::globals::O,
         &attn_fwd_layout<128, 3>::globals::Q,
         &attn_fwd_layout<128, 3>::globals::K,
         &attn_fwd_layout<128, 3>::globals::V
     );
-    py::bind_kernel<kittens::prototype::lcf::kernel<attn_fwd_template<128, true>>>(m, "fwd_128_causal",
+    py::bind_kernel<kittens::prototype::lcf::kernel<attn_fwd_template<128, true, false>>>(m, "fwd_128_causal",
+        &attn_fwd_layout<128, 3>::globals::O,
+        &attn_fwd_layout<128, 3>::globals::Q,
+        &attn_fwd_layout<128, 3>::globals::K,
+        &attn_fwd_layout<128, 3>::globals::V
+    );
+    py::bind_kernel<kittens::prototype::lcf::kernel<attn_fwd_template<128, true, true, 128>>>(m, "fwd_128_window",
         &attn_fwd_layout<128, 3>::globals::O,
         &attn_fwd_layout<128, 3>::globals::Q,
         &attn_fwd_layout<128, 3>::globals::K,
