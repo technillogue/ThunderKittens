@@ -8,7 +8,6 @@ from setuptools.command.build_ext import build_ext
 from setuptools.extension import Extension
 
 class BuildCUDA(build_ext):
-    """ Custom build command to compile CUDA code using Makefile. """
     
     def run(self):
         package_name = "tk_mla"
@@ -22,7 +21,6 @@ class BuildCUDA(build_ext):
 
         build_ext.run(self)
 
-# Define the package
 setup(
     name="tk_mla",
     version="0.1",

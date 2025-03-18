@@ -3,7 +3,10 @@ This file is taken directly, without modification, from:
     
     ThunderKittens/kernels/attn/demo/mla_decode
 
-TODO: Clean up and refactor.
+TODO:
+    • Clean up the code style to be consistent.
+    • Optimize the code with fewer loops and CPU ops.
+    • Properly document the code.
 
 """
 from __future__ import annotations
