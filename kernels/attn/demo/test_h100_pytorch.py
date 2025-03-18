@@ -62,11 +62,9 @@ else:
     sliding_window_mask = torch.ones((N, N), device='cuda')
     window_size = 128
 
-    # 
     torch.triu(sliding_window_mask, diagonal=-window_size, out=sliding_window_mask)
     sliding_window_mask = sliding_window_mask == 1.0
     
-
 
 o = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=causal, attn_mask=sliding_window_mask)
 

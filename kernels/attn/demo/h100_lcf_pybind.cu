@@ -47,7 +47,7 @@ template<int D, int NUM_WORKERS> struct attn_fwd_layout {
         rt_bf<16, kv_tile::rows> att_block_mma;
     };
 };
-template<int D, bool causal, bool window, int WINDOW_SIZE = 256> struct attn_fwd_template {
+template<int D, bool causal> struct attn_fwd_template {
     static constexpr int NUM_CONSUMER_WARPS = 12, NUM_WORKERS = NUM_CONSUMER_WARPS/4, INPUT_PIPE_STAGES = 2;
     using layout = attn_fwd_layout<D, NUM_WORKERS>;
     __device__ static inline void common_setup(common_setup_args<layout> args) {
@@ -94,7 +94,7 @@ template<int D, bool causal, bool window, int WINDOW_SIZE = 256> struct attn_fwd
             * causal is True and K/V index is greater than Q index
             * which happens when args.iter*layout::kv_tile::rows > args.common.seq*NUM_WORKERS+warpgroup::groupid()
             */
-            if ((!causal || kvidx <= qidx) && (!window || (qidx - kvidx) < WINDOW_SIZE)) {
+            if (!causal || kvidx <= qidx) {
                 constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
                 // A = Q @ K.T
                 warpgroup::mm_ABt(args.state.att_block, args.scratch.q[warpgroup::groupid()], args.input.k);
@@ -102,20 +102,13 @@ template<int D, bool causal, bool window, int WINDOW_SIZE = 256> struct attn_fwd
                 warpgroup::mma_async_wait();
                 // softmax
                 right_fill(args.state.att_block, args.state.att_block, args.globals.K.rows - args.iter*layout::kv_tile::rows, base_types::constants<float>::neg_infty());
-                // blocks are wider than they are tall, so we have mulitple blocks on the diagonal
-                // kvidx - qidx gives the (negative) offset based on block
-                // 16 * (warpgroup::warpid() % 4) gives the offset based on the warp
-                int causal_offset = kvidx - qidx - 16 * (warpgroup::warpid() % 4);
                 if (causal) {
                     // if qidx - kvidx is less than the number of columns, this tile passes the diagonal
                     if (qidx - kvidx < layout::qo_tile::cols) {
-                        tril(args.state.att_block, args.state.att_block, causal_offset, base_types::constants<float>::neg_infty());
-                    }
-                }
-                if (window) {
-                    if (qidx - kvidx >= layout::qo_tile::cols - WINDOW_SIZE) {
-                        // if the window passes the end of the tile, we need to mask the end
-                        triu(args.state.att_block, args.state.att_block, causal_offset + WINDOW_SIZE, base_types::constants<float>::neg_infty());
+                        // blocks are wider than they are tall, so we have mulitple blocks on the diagonal
+                        // kvidx - qidx gives the (negative) offset based on block
+                        // 16 * (warpgroup::warpid() % 4) gives the offset based on the warp
+                        tril(args.state.att_block, args.state.att_block, kvidx - qidx - 16 * (warpgroup::warpid() % 4), base_types::constants<float>::neg_infty());
                     }
                 }
                 row_max(args.state.max_vec, args.state.att_block, args.state.max_vec); // accumulate onto the max_vec
@@ -154,19 +147,13 @@ template<int D, bool causal, bool window, int WINDOW_SIZE = 256> struct attn_fwd
 
 PYBIND11_MODULE(attn_fwd_pybind, m) {
     m.doc() = "TK Attention Forward Demo";
-    py::bind_kernel<kittens::prototype::lcf::kernel<attn_fwd_template<128, false, false>>>(m, "fwd_128_noncausal",
+    py::bind_kernel<kittens::prototype::lcf::kernel<attn_fwd_template<128, false>>>(m, "fwd_128_noncausal",
         &attn_fwd_layout<128, 3>::globals::O,
         &attn_fwd_layout<128, 3>::globals::Q,
         &attn_fwd_layout<128, 3>::globals::K,
         &attn_fwd_layout<128, 3>::globals::V
     );
-    py::bind_kernel<kittens::prototype::lcf::kernel<attn_fwd_template<128, true, false>>>(m, "fwd_128_causal",
-        &attn_fwd_layout<128, 3>::globals::O,
-        &attn_fwd_layout<128, 3>::globals::Q,
-        &attn_fwd_layout<128, 3>::globals::K,
-        &attn_fwd_layout<128, 3>::globals::V
-    );
-    py::bind_kernel<kittens::prototype::lcf::kernel<attn_fwd_template<128, true, true, 128>>>(m, "fwd_128_window",
+    py::bind_kernel<kittens::prototype::lcf::kernel<attn_fwd_template<128, true>>>(m, "fwd_128_causal",
         &attn_fwd_layout<128, 3>::globals::O,
         &attn_fwd_layout<128, 3>::globals::Q,
         &attn_fwd_layout<128, 3>::globals::K,
