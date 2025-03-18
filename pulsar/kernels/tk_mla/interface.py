@@ -80,10 +80,6 @@ def decode(
 
         raise NotImplementedError("Varlen is not supported in ThunderMLA.")
     
-    if cos is not None or sin is not None:
-
-        raise NotImplementedError("Rotary embedding is not supported in ThunderMLA.")
-    
     if not causal:
 
         raise NotImplementedError("Non-Causal attention is not supported in ThunderMLA.")
@@ -118,6 +114,8 @@ def decode(
         instructions,
         query,
         query_v,
+        sin,
+        cos,
         kcache,
         vcache,
         block_table,
