@@ -13,6 +13,7 @@ H = 1
 N = 2048 if len(sys.argv) <= 2 else int(sys.argv[2])
 D = 128 if len(sys.argv) <= 3 else int(sys.argv[3])
 causal = False if len(sys.argv) <= 4 else sys.argv[4] == 'causal'
+window = False if len(sys.argv) <= 5 else sys.argv[5] == 'window'
 
 print(f"Running {sys.argv[1]} with B={B}, H={H}, N={N}, D={D}, causal={causal}")
 
@@ -55,10 +56,24 @@ else:
     print('Invalid test name')
     sys.exit(0)
 
-o = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=causal)
+if not window:
+    sliding_window_mask = None
+else:
+    sliding_window_mask = torch.ones((N, N), device='cuda')
+    window_size = 128
+
+    # 
+    torch.triu(sliding_window_mask, diagonal=-window_size, out=sliding_window_mask)
+    sliding_window_mask = sliding_window_mask == 1.0
+    
+
+
+o = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=causal, attn_mask=sliding_window_mask)
 
 o_tk = torch.empty_like(q)
-if causal:
+if window:
+    attn_fwd_pybind.fwd_128_window(o_tk, q, k, v)
+elif causal:
     attn_fwd_pybind.fwd_128_causal(o_tk, q, k, v)
 else:
     attn_fwd_pybind.fwd_128_noncausal(o_tk, q, k, v)
