@@ -8,11 +8,13 @@ using namespace kittens;
 using namespace kittens::prototype;
 using namespace kittens::prototype::interpreter;
 
-static constexpr int QKRot_D = 64, QVO_D = 512, QVO_Dd2 = QVO_D/2, NUM_ROWS = 32, PAGE_SIZE = 256;
+static constexpr int QKRot_D = 64, QKRot_Dd2 = 64/2, QVO_D = 512, QVO_Dd2 = QVO_D/2, NUM_ROWS = 32, PAGE_SIZE = 256;
 using qrot_tile           = st_bf<64, QKRot_D>;
 using qvo_tile            = st_bf<64, QVO_D>;
 using q_global            = kittens::gl<bf16, -1, -1, -1, QKRot_D, qrot_tile>; // B * R * H * D_QKRot_D
 using qv_global           = kittens::gl<bf16, -1, -1, -1, QVO_D, qvo_tile>; // B * R * H * D_QVO_D
+using sin_global          = kittens::gl<bf16, 1, 1, -1, QKRot_Dd2>;
+using cos_global          = kittens::gl<bf16, 1, 1, -1, QKRot_Dd2>;
 using kcache_tile         = st_bf<NUM_ROWS, QKRot_D>;
 using vcache_tile         = st_bf<NUM_ROWS, QVO_D>; // we need the v_tile for later
 using vcache_tile2        = st_bf<NUM_ROWS, QVO_Dd2>; // we need the v_tile for later
@@ -39,6 +41,8 @@ struct config {
         instructions_global instructions;
         q_global Q;
         qv_global QV;
+        sin_global sin;
+        cos_global cos;
         kcache_global K_cache;
         vcache_global V_cache;
         table_global Table;
@@ -75,6 +79,7 @@ struct partial_layout {
         int start_pos; // MUST BE A MULTIPLE OF PAGE_SIZE
         int end_pos; // One past the last position to load
         int length; // the length of the overall sequence in question
+        int original_length; // the original length of the sequence not adjusted for the causal mask
     };
     struct consumer_state {
         col_vec<rt_fl<16, kcache_tile::rows>> max_vec, norm_vec;
@@ -99,6 +104,7 @@ struct partial_template {
         args.common.start_pos   =  args.instruction[6];
         args.common.end_pos     =  args.instruction[7];
         args.common.length      =  args.instruction[8];
+        args.common.original_length  =  args.instruction[8];
         args.num_iters          = (args.common.end_pos - args.common.start_pos + NUM_ROWS - 1) / NUM_ROWS;
         args.common.length    -= (args.globals.Q.depth() - (args.common.q_seq_idx + warpgroup::warpid()) - 1); // adjust for the causal mask
         
@@ -137,6 +143,36 @@ struct partial_template {
             else { one(args.state.max_vec); mul(args.state.max_vec, args.state.max_vec, -999999.f); }
             zero(args.state.o);
             load_async_wait();
+
+            // Apply RoPE Embeddings to Q 
+            row_vec<rt_bf<16, QKRot_Dd2>> cos_rv;
+            row_vec<rt_bf<16, QKRot_Dd2>> sin_rv;
+
+            rt_bf<16, QKRot_Dd2> temp_sin_rt;
+            rt_bf<16, QKRot_Dd2> temp_cos_rt;
+
+            load(cos_rv, args.globals.cos, {0, 0, args.common.original_length - args.globals.Q.depth() + args.common.q_seq_idx + warpgroup::warpid(), 0});
+            load(sin_rv, args.globals.sin, {0, 0, args.common.original_length - args.globals.Q.depth() + args.common.q_seq_idx + warpgroup::warpid(), 0});
+
+            auto other_qrot_st = subtile_inplace<16, QKRot_Dd2>(args.scratch.qrot, {warpgroup::warpid(), 1 - warpgroup::groupid()});
+            
+            load(temp_cos_rt, qrot_st);
+            load(temp_sin_rt, other_qrot_st);
+ 
+            // (q1, q2) -> (q1 * cos - q2 * sin, q1 * sin + q2 * cos)
+            mul_col(temp_cos_rt, temp_cos_rt, cos_rv);
+            mul_col(temp_sin_rt, temp_sin_rt, sin_rv);
+            
+            if (warpgroup::groupid() == 0) {
+                sub(temp_cos_rt, temp_cos_rt, temp_sin_rt);
+            } else {
+                add(temp_cos_rt, temp_cos_rt, temp_sin_rt);
+            }
+
+            warpgroup::sync(6);
+            store(qrot_st, temp_cos_rt);
+            warpgroup::sync(5);
+
 #ifdef KITTENS_TIMINGS
             if(group<8>::laneid() == 0) args.timings[2] = clock64();
 #endif
@@ -495,6 +531,8 @@ PYBIND11_MODULE(mla_decode, m) {
         &config<16>::globals::instructions,
         &config<16>::globals::Q,
         &config<16>::globals::QV,
+        &config<16>::globals::sin,
+        &config<16>::globals::cos,
         &config<16>::globals::K_cache,
         &config<16>::globals::V_cache,
         &config<16>::globals::Table,
@@ -512,6 +550,8 @@ PYBIND11_MODULE(mla_decode, m) {
         &config<8>::globals::instructions,
         &config<8>::globals::Q,
         &config<8>::globals::QV,
+        &config<8>::globals::sin,
+        &config<8>::globals::cos,
         &config<8>::globals::K_cache,
         &config<8>::globals::V_cache,
         &config<8>::globals::Table,
