@@ -8,6 +8,11 @@ using namespace kittens;
 using namespace kittens::prototype;
 using namespace kittens::prototype::interpreter;
 
+template <typename T>
+constexpr T cdiv(T a, T b) {
+    return (a + b - 1) / b;
+}
+
 static constexpr int QKRot_D = 64, QKRot_Dd2 = 64/2, QVO_D = 512, QVO_Dd2 = QVO_D/2, NUM_ROWS = 32, PAGE_SIZE = 256;
 using qrot_tile           = st_bf<64, QKRot_D>;
 using qvo_tile            = st_bf<64, QVO_D>;
@@ -24,7 +29,6 @@ using kcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QKRot_D, kcache_
 using vcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QVO_D, vcache_tile>;   // 1 * #page * pagesize * QVO_D
 using knew_global         = kittens::gl<bf16, 1, -1, -1, QKRot_D, kcache_tile>;        // 1 * B * lookahead * QKRot_D
 using vnew_global         = kittens::gl<bf16, 1, -1, -1, QVO_D, vcache_tile>;          // 1 * B * lookahead * QVO_D
-using seqlens_global      = kittens::gl<int, 1, 1, 1, -1>; // B
 using ops_global          = kittens::gl<bf16, 1, -1, -1, 8>;
 using instructions_global = kittens::gl<int, 1, -1, -1, 32>;
 using table_global        = kittens::gl<int, 1, 1, -1, -1>; // B * (max # pages)
@@ -117,7 +121,7 @@ struct partial_template {
         // valid seqlen of the assigned batch
         args.common.length      =  args.instruction[8];
         args.common.original_length  =  args.instruction[8];
-        args.num_iters          = (args.common.end_pos - args.common.start_pos + NUM_ROWS - 1) / NUM_ROWS;
+        args.num_iters          = cdiv(args.common.end_pos - args.common.start_pos, NUM_ROWS);
         args.common.length     += args.common.q_seq_idx + warpgroup::warpid() + 1; // adjust for the causal mask
         
     }
@@ -231,10 +235,10 @@ struct partial_template {
                     const auto num_new_tokens = local_q_idx + 1;  // include self
                     right_fill(att_block_fp32, att_block_fp32, num_new_tokens, -9999999999.f);
 
-                    // // one thread per warp
-                    // if (threadIdx.x % 32 == 0) {
-                    //     printf("Warp %d: local_q_idx %d, num_new_tokens %d, start_pos %d, end_pos %d\n", warpgroup::warpid(), local_q_idx, num_new_tokens, args.common.start_pos, args.common.end_pos);
-                    // }
+                    // one thread per warp
+                    if (threadIdx.x % 32 == 0) {
+                        printf("Warp %d, iter %d: local_q_idx %d, num_new_tokens %d, start_pos %d, end_pos %d, length %d, original_length %d\n", warpgroup::warpid(), args.iter, local_q_idx, num_new_tokens, args.common.start_pos, args.common.end_pos, args.common.length, args.common.original_length);
+                    }
                 }
 
                 row_max(local_max_vec, att_block_fp32, local_max_vec);
@@ -521,7 +525,7 @@ constexpr float REDUCTION_COST_PER_STEP = 0.4f;      // Cost per reduction step
 // constexpr float SYNCHRONIZATION_COST = 0.5f;      // Synchronization cost between dependent operations, not used so commented to disable warnings.
 
 float get_quality(const std::vector<float>& next_times_input, int num_processors, int num_tokens, int seq_length) {
-    int num_partial_steps = (seq_length + 31) / 32;
+    int num_partial_steps = cdiv(seq_length, 32);
 
     if (next_times_input.size() > num_processors) {
         // This particular scheduler is just not set up to deal with these situations.

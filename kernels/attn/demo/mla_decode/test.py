@@ -36,14 +36,18 @@ def init_arguments(seq_lengths: List[int], new_tokens: int, q_heads: int=16):
     B = len(seq_lengths)
 
     # Need to initialize QRot, QV, K_cache, V_cache, Lengths, Table    
-    QRot    = torch.ones(B, new_tokens, q_heads, D_Rot, dtype=torch.bfloat16, device='cuda')
-    QV      = torch.ones(B, new_tokens, q_heads, D_Main, dtype=torch.bfloat16, device='cuda')
-    K_cache = torch.ones(NUM_PAGES, PAGE_SIZE, D_Rot, dtype=torch.bfloat16, device='cuda')
-    V_cache = torch.ones(NUM_PAGES, PAGE_SIZE, D_Main, dtype=torch.bfloat16, device='cuda')
+    QRot    = torch.randn(B, new_tokens, q_heads, D_Rot, dtype=torch.bfloat16, device='cuda')
+    QV      = torch.randn(B, new_tokens, q_heads, D_Main, dtype=torch.bfloat16, device='cuda')
+    K_cache = torch.randn(NUM_PAGES, PAGE_SIZE, D_Rot, dtype=torch.bfloat16, device='cuda')
+    V_cache = torch.randn(NUM_PAGES, PAGE_SIZE, D_Main, dtype=torch.bfloat16, device='cuda')
     Lengths = torch.tensor(seq_lengths, dtype=torch.int32, device='cuda')
     Table = torch.randint(0, NUM_PAGES, (B, MAX_NUM_PAGES), dtype=torch.int32, device='cuda')
-    K_new = torch.ones(B, new_tokens, D_Rot, dtype=torch.bfloat16, device='cuda') + torch.arange(new_tokens, dtype=torch.bfloat16, device='cuda')[None, :, None]
-    V_new = torch.ones(B, new_tokens, D_Main, dtype=torch.bfloat16, device='cuda')
+    K_new = torch.randn(B, new_tokens, D_Rot, dtype=torch.bfloat16, device='cuda')
+    V_new = torch.randn(B, new_tokens, D_Main, dtype=torch.bfloat16, device='cuda')
+
+    # debugging crutch
+    V_cache.fill_(1)
+    V_new.fill_(1)
 
     return QRot, QV, K_cache, V_cache, Lengths, Table, K_new, V_new
 
@@ -194,10 +198,6 @@ def run_mla_torch(QRot, QV, K_cache, V_cache, K_new, V_new, Lengths, Table):
     full_V = V_cache[Table].reshape(Q.shape[0], -1, QV.shape[-1])
 
     k_new_expanded = torch.cat([K_new, V_new], dim=-1)
-    print("kcache", full_K.shape)
-    print("vcache", full_V.shape)
-    print("knew", k_new_expanded.shape)
-    print("vnew", V_new.shape)
 
     # [B, L, D] cat [B, R, D] -> [B, L+R, D]
     full_K = torch.cat([full_K, k_new_expanded], dim=-2)
@@ -239,6 +239,7 @@ def main(seq_lengths, new_tokens, q_heads=16, use_rope=True):
             errstring = ["✓" if e else "✗" for e in s]
             print(" ".join(errstring))
             print()
+        assert False
 
 
     # time_per_iter = profile_thundermla(QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings)
@@ -247,14 +248,17 @@ def main(seq_lengths, new_tokens, q_heads=16, use_rope=True):
     # save_gantt_chart(Timings, Instructions, name='new')
 
 if __name__ == "__main__":
-    main([1], 4, 16)
-    main([32], 4, 16)
+    # main([1], 4, 16)
+    main([32], 1, 16)
     main([64], 1, 16)
-    main([4641,45118,1730,1696], 4, 16)
-    main([65536], 1, 16)
-    main([512]*64, 2, 16)
-    main([4096]*132, 4, 16)
-    main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 16)
+    main([32], 4, 16)
+    main([64], 4, 16)
+
+    # main([4641,45118,1730,1696], 4, 16)
+    # main([65536], 1, 16)
+    # main([512]*64, 2, 16)
+    # main([4096]*132, 4, 16)
+    # main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 16)
     
     # # main([4641,45118,1730,1696], 4, 8, use_rope)
     # main([65536], 1, 8, use_rope)
