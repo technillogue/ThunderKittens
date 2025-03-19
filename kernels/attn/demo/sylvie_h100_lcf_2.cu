@@ -94,7 +94,7 @@ template<int D, bool causal, bool window, int WINDOW_SIZE = 256> struct attn_fwd
             * causal is True and K/V index is greater than Q index
             * which happens when args.iter*layout::kv_tile::rows > args.common.seq*NUM_WORKERS+warpgroup::groupid()
             */
-            if ((!causal || kvidx <= qidx) && (!window || (qidx - kvidx) < WINDOW_SIZE)) {
+            if ((!causal || kvidx <= qidx) && (!window || (qidx - kvidx - layout::kv_tile::rows) < WINDOW_SIZE)) {
                 constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
                 // A = Q @ K.T
                 warpgroup::mm_ABt(args.state.att_block, args.scratch.q[warpgroup::groupid()], args.input.k);
