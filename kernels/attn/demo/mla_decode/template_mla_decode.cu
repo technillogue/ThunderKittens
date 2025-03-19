@@ -11,6 +11,8 @@ using namespace kittens::prototype::interpreter;
 static constexpr int QKRot_D = 64, QKRot_Dd2 = 64/2, QVO_D = 512, QVO_Dd2 = QVO_D/2, NUM_ROWS = 32, PAGE_SIZE = 256;
 using qrot_tile           = st_bf<64, QKRot_D>;
 using qvo_tile            = st_bf<64, QVO_D>;
+// batch, depth, rows, cols
+// R == lookahead
 using q_global            = kittens::gl<bf16, -1, -1, -1, QKRot_D, qrot_tile>; // B * R * H * D_QKRot_D
 using qv_global           = kittens::gl<bf16, -1, -1, -1, QVO_D, qvo_tile>; // B * R * H * D_QVO_D
 using sin_global          = kittens::gl<bf16, 1, 1, -1, QKRot_Dd2>;
@@ -19,7 +21,10 @@ using kcache_tile         = st_bf<NUM_ROWS, QKRot_D>;
 using vcache_tile         = st_bf<NUM_ROWS, QVO_D>; // we need the v_tile for later
 using vcache_tile2        = st_bf<NUM_ROWS, QVO_Dd2>; // we need the v_tile for later
 using kcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QKRot_D, kcache_tile>; // 1 * #page * pagesize * QKRot_D
-using vcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QVO_D, vcache_tile>; // 1 * #page * pagesize * QVO_D
+using vcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QVO_D, vcache_tile>;   // 1 * #page * pagesize * QVO_D
+using knew_global         = kittens::gl<bf16, 1, -1, -1, QKRot_D, kcache_tile>;        // 1 * B * lookahead * QKRot_D
+using vnew_global         = kittens::gl<bf16, 1, -1, -1, QVO_D, vcache_tile>;          // 1 * B * lookahead * QVO_D
+using seqlens_global      = kittens::gl<int, 1, 1, 1, -1>; // B
 using ops_global          = kittens::gl<bf16, 1, -1, -1, 8>;
 using instructions_global = kittens::gl<int, 1, -1, -1, 32>;
 using table_global        = kittens::gl<int, 1, 1, -1, -1>; // B * (max # pages)
@@ -45,6 +50,8 @@ struct config {
         cos_global cos;
         kcache_global K_cache;
         vcache_global V_cache;
+        knew_global K_new;
+        vnew_global V_new;
         table_global Table;
         o_global O;
         o_scratch_global<Q_HEADS> O_scratch;
@@ -70,6 +77,7 @@ struct partial_layout {
     using globals = config<Q_HEADS>::globals;
     struct input_block { kcache_tile kcache; vcache_tile vcache; };
     struct scratch_block { qrot_tile qrot; qvo_tile qvo; st_bf<64, kcache_tile::rows> att_block; sv_fl<64> max_vec, norm_vec; };
+    // always one token per QVO block; if Q_HEADS < 16, then we need to pad
     struct finish_block { st_fl<16, QVO_Dd2> o[4][2]; sv_fl<16> lvec[4]; };
     struct common_state {
         int uid;
@@ -99,14 +107,18 @@ struct partial_template {
         args.common.uid         =  args.instruction[1];
         args.common.dst         = {args.instruction[2],
                                    args.instruction[3]};
+        // which batch is assigned to this worker
         args.common.q_batch_idx =  args.instruction[4];
+        // which chunk of tokens is assigned to this worker
         args.common.q_seq_idx   =  args.instruction[5];
+        // positions of KV cache assigned to this partial split. Worker will lookup page mapping from Table. positions may not be aligned to PAGE_SIZE.
         args.common.start_pos   =  args.instruction[6];
         args.common.end_pos     =  args.instruction[7];
+        // valid seqlen of the assigned batch
         args.common.length      =  args.instruction[8];
         args.common.original_length  =  args.instruction[8];
         args.num_iters          = (args.common.end_pos - args.common.start_pos + NUM_ROWS - 1) / NUM_ROWS;
-        args.common.length    -= (args.globals.Q.depth() - (args.common.q_seq_idx + warpgroup::warpid()) - 1); // adjust for the causal mask
+        args.common.length     += args.common.q_seq_idx + warpgroup::warpid() + 1; // adjust for the causal mask
         
     }
     struct producer {
@@ -134,6 +146,8 @@ struct partial_template {
 #ifdef KITTENS_TIMINGS
             if(group<8>::laneid() == 0) args.timings[1] = clock64();
 #endif
+            // split up Q tile across warps (tokens) and dim (groups) (total 8 ways)
+            // each warp loads one token's worth of QRot and QV
             auto qrot_st = subtile_inplace<16, QKRot_D/2>(args.scratch.qrot, {warpgroup::warpid(), warpgroup::groupid()});
             load_async(qrot_st, args.globals.Q, {args.common.q_batch_idx, args.common.q_seq_idx + warpgroup::warpid(), 0, warpgroup::groupid()});
             auto qvo_st = subtile_inplace<16, QVO_Dd2>(args.scratch.qvo, {warpgroup::warpid(), warpgroup::groupid()});
@@ -151,8 +165,9 @@ struct partial_template {
             rt_bf<16, QKRot_Dd2> temp_sin_rt;
             rt_bf<16, QKRot_Dd2> temp_cos_rt;
 
-            load(cos_rv, args.globals.cos, {0, 0, args.common.original_length - args.globals.Q.depth() + args.common.q_seq_idx + warpgroup::warpid(), 0});
-            load(sin_rv, args.globals.sin, {0, 0, args.common.original_length - args.globals.Q.depth() + args.common.q_seq_idx + warpgroup::warpid(), 0});
+            // TODO: new convention, original_length is the preexisting KV length, not including new tokens.
+            load(cos_rv, args.globals.cos, {0, 0, args.common.original_length + args.common.q_seq_idx + warpgroup::warpid(), 0});
+            load(sin_rv, args.globals.sin, {0, 0, args.common.original_length + args.common.q_seq_idx + warpgroup::warpid(), 0});
 
             auto other_qrot_st = subtile_inplace<16, QKRot_Dd2>(args.scratch.qrot, {warpgroup::warpid(), 1 - warpgroup::groupid()});
             
@@ -177,7 +192,7 @@ struct partial_template {
             if(group<8>::laneid() == 0) args.timings[2] = clock64();
 #endif
         }
-        template<bool do_right_fill> __device__ static inline void internal_compute(consumer_compute_args<layout> args) {
+        template<bool do_right_fill, bool do_new_tokens> __device__ static inline void internal_compute(consumer_compute_args<layout> args) {
             // 1.44269504089f is from exp2
             if(args.iter == 0 && args.num_iters > 1) {
                 group<12>::arrive(11); // this <12> will allow us to prevent the second producer load from happening before this point.
@@ -194,9 +209,11 @@ struct partial_template {
 
             if(warpgroup::groupid() == 0) {
                 // A = Q @ K.T
+                // [Q_HEADS, D] @ [NR, D] -> [Q_HEADS, NR] (each warp has its own token of Q, and all share the same KV)
                 rt_fl<16, kcache_tile::rows> att_block_fp32;
                 warpgroup::mm_ABt(att_block_fp32, args.scratch.qrot, args.input.kcache);
                 warpgroup::mma_ABt(att_block_fp32, args.scratch.qvo, args.input.vcache);
+                // A = [Q_HEADS, R]
 
                 copy(local_max_vec,  args.state.max_vec);
                 copy(local_norm_vec, args.state.norm_vec);
@@ -208,6 +225,16 @@ struct partial_template {
                 if constexpr (do_right_fill) { // need to mask out a bunch of entries in the last page
                     const int length = args.common.length - args.common.start_pos - args.iter*NUM_ROWS;
                     right_fill(att_block_fp32, att_block_fp32, length, -9999999999.f);
+                } else if constexpr (do_new_tokens) {
+                    // we are loading only new KV tokens in this tile; mask out the unused tile space
+                    const auto local_q_idx = args.common.q_seq_idx + warpgroup::warpid();
+                    const auto num_new_tokens = local_q_idx + 1;  // include self
+                    right_fill(att_block_fp32, att_block_fp32, num_new_tokens, -9999999999.f);
+
+                    // // one thread per warp
+                    // if (threadIdx.x % 32 == 0) {
+                    //     printf("Warp %d: local_q_idx %d, num_new_tokens %d, start_pos %d, end_pos %d\n", warpgroup::warpid(), local_q_idx, num_new_tokens, args.common.start_pos, args.common.end_pos);
+                    // }
                 }
 
                 row_max(local_max_vec, att_block_fp32, local_max_vec);
@@ -235,6 +262,7 @@ struct partial_template {
             mul_row(args.state.o, args.state.o, max_vec_last_scaled); // normalize o_reg before mma
 
             // O += A @ V
+            // [Q_HEADS, NR] @ [NR, D] -> [Q_HEADS, D]
             auto (&v_smem)[2] = reinterpret_cast<vcache_tile2(&)[2]>(args.input.vcache);
             warpgroup::mma_AB(args.state.o, args.scratch.att_block, v_smem[warpgroup::groupid()]);
 
@@ -242,11 +270,39 @@ struct partial_template {
             copy(args.state.norm_vec, local_norm_vec);
 
             warpgroup::mma_async_wait();
-            if(warpgroup::laneid() == 0) arrive(args.inputs_finished, WARPGROUP_WARPS); // done!
         }
         __device__ static inline void compute(consumer_compute_args<layout> args) {
-            if(args.iter >= args.num_iters-2) internal_compute<true>(args);
-            else internal_compute<false>(args);
+            if(args.iter >= args.num_iters-2) internal_compute<true, false>(args);
+            else internal_compute<false, false>(args);
+
+            // in the last iteration of the task assigned to the rightmost partial of the sequence,
+            // we will also handle the new KV tokens, in an extra unscheduled iteration.
+            if (args.iter >= args.num_iters-1 && args.common.end_pos == args.common.original_length) {
+                // Q = [Q_HEADS * R, D] (we already have this from setup)
+                // K = [R, D] (new KV tokens, load GMEM -> SMEM)
+                // QK -> [Q_HEADS * R, R]
+                // V = [R, D]
+                // QK @ V -> [Q_HEADS * R, D]
+                // where each [R, D] is masked according to current Q token position.
+                // We require that R <= NUM_ROWS.
+                if (warpgroup::groupid() == 0) {
+                    // copy Knew and Vnew to existing SMEM K/V tiles so we can reuse internal_compute    
+                    // slice [NUM_ROWS, D] from [1, B, R, D]
+                    // always load tile at [0, 0], since tile shape works out: NUM_ROWS >= R and NUM_COLS == D
+                    load_async(args.input.kcache, args.globals.K_new, {0, args.common.q_batch_idx, 0, 0});
+                    load_async(args.input.vcache, args.globals.V_new, {0, args.common.q_batch_idx, 0, 0});
+                    load_async_wait();
+                }
+
+                // need additional template to cover non-causal case
+                internal_compute<false, true>(args);
+                // results are in args.state.o
+            
+                // writeout KV update
+            }
+
+            if(warpgroup::laneid() == 0) arrive(args.inputs_finished, WARPGROUP_WARPS); // done!
+
         }
         __device__ static inline void finish(consumer_finish_args<layout> args) {
             col_vec<rt_fl<16, kcache_tile::rows>> local_max_vec, local_norm_vec;
@@ -535,6 +591,8 @@ PYBIND11_MODULE(mla_decode, m) {
         &config<16>::globals::cos,
         &config<16>::globals::K_cache,
         &config<16>::globals::V_cache,
+        &config<16>::globals::K_new,
+        &config<16>::globals::V_new,
         &config<16>::globals::Table,
         &config<16>::globals::O,
         &config<16>::globals::O_scratch,
@@ -554,6 +612,8 @@ PYBIND11_MODULE(mla_decode, m) {
         &config<8>::globals::cos,
         &config<8>::globals::K_cache,
         &config<8>::globals::V_cache,
+        &config<8>::globals::K_new,
+        &config<8>::globals::V_new,
         &config<8>::globals::Table,
         &config<8>::globals::O,
         &config<8>::globals::O_scratch,

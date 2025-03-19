@@ -1,20 +1,24 @@
-import mla_decode
-import torch
-import numpy as np
-import math
 import heapq
-import time
+import math
 import sys
-
+import time
 from dataclasses import dataclass, field
-from typing import List, Tuple, Dict
-import matplotlib.pyplot as plt
-from scheduler_v2 import backward_schedule
-from scheduler import sample_schedule_generator, priority_schedule_tasks, visualize_schedule, create_arguments_from_task_schedule
-from timings import save_gantt_chart
-from graphviz import Digraph
-from scheduler_regression import estimate_schedule_length
+from typing import Dict, List, Tuple
 
+import matplotlib.pyplot as plt
+import mla_decode
+import numpy as np
+import torch
+from graphviz import Digraph
+from scheduler import (
+    create_arguments_from_task_schedule,
+    priority_schedule_tasks,
+    sample_schedule_generator,
+    visualize_schedule,
+)
+from scheduler_regression import estimate_schedule_length
+from scheduler_v2 import backward_schedule
+from timings import save_gantt_chart
 
 torch.manual_seed(0)
 
@@ -32,14 +36,16 @@ def init_arguments(seq_lengths: List[int], new_tokens: int, q_heads: int=16):
     B = len(seq_lengths)
 
     # Need to initialize QRot, QV, K_cache, V_cache, Lengths, Table    
-    QRot    = torch.randn(B, new_tokens, q_heads, D_Rot, dtype=torch.bfloat16, device='cuda')
-    QV      = torch.randn(B, new_tokens, q_heads, D_Main, dtype=torch.bfloat16, device='cuda')
-    K_cache = torch.randn(NUM_PAGES, PAGE_SIZE, D_Rot, dtype=torch.bfloat16, device='cuda')
-    V_cache = torch.randn(NUM_PAGES, PAGE_SIZE, D_Main, dtype=torch.bfloat16, device='cuda')
+    QRot    = torch.ones(B, new_tokens, q_heads, D_Rot, dtype=torch.bfloat16, device='cuda')
+    QV      = torch.ones(B, new_tokens, q_heads, D_Main, dtype=torch.bfloat16, device='cuda')
+    K_cache = torch.ones(NUM_PAGES, PAGE_SIZE, D_Rot, dtype=torch.bfloat16, device='cuda')
+    V_cache = torch.ones(NUM_PAGES, PAGE_SIZE, D_Main, dtype=torch.bfloat16, device='cuda')
     Lengths = torch.tensor(seq_lengths, dtype=torch.int32, device='cuda')
     Table = torch.randint(0, NUM_PAGES, (B, MAX_NUM_PAGES), dtype=torch.int32, device='cuda')
+    K_new = torch.ones(B, new_tokens, D_Rot, dtype=torch.bfloat16, device='cuda') + torch.arange(new_tokens, dtype=torch.bfloat16, device='cuda')[None, :, None]
+    V_new = torch.ones(B, new_tokens, D_Main, dtype=torch.bfloat16, device='cuda')
 
-    return QRot, QV, K_cache, V_cache, Lengths, Table
+    return QRot, QV, K_cache, V_cache, Lengths, Table, K_new, V_new
 
 def create_thundermla_arguments(seq_lengths, new_tokens, q_heads = 16):
     # Processor assignment heuristic: assign processors proportionally to sequence lengths.
@@ -102,18 +108,18 @@ def create_rope_embeddings(seq_lengths, new_tokens, rope_dim=64, base: float = 1
     
 
 def apply_rope(QRot, Lengths, sin, cos):
-
     QRot_clone = QRot.clone()
     batch_size, new_tokens, num_heads, rope_dim = QRot.shape
     half_dim = rope_dim // 2
 
     def rotate(q, length):
+        # Get positions for the new tokens - they should be the next positions after length
+        positions = torch.arange(length, length + new_tokens)
+        new_tok_sin = sin[positions]
+        new_tok_cos = cos[positions]
 
-        new_tok_sin = sin[length - new_tokens : length]
-        new_tok_cos = cos[length - new_tokens : length]
-
-        sin_expanded = new_tok_sin.unsqueeze(0).unsqueeze(2)  # [1, new_tokens, 1, half_dim]
-        cos_expanded = new_tok_cos.unsqueeze(0).unsqueeze(2)  # [1, new_tokens, 1, half_dim]
+        sin_expanded = new_tok_sin.unsqueeze(1)  # [new_tokens, 1, half_dim]
+        cos_expanded = new_tok_cos.unsqueeze(1)  # [new_tokens, 1, half_dim]
 
         q1, q2 = q[..., :half_dim], q[..., half_dim:]
 
@@ -124,89 +130,79 @@ def apply_rope(QRot, Lengths, sin, cos):
 
     # Could just do this at once as a batch operation, but good enough for now
     for batch_idx in range(len(Lengths)):
-
         seq_length = Lengths[batch_idx]
         QRot_clone[batch_idx] = rotate(QRot_clone[batch_idx], seq_length)
 
     return QRot_clone
 
 
-def run_thundermla(QRot, QV, sin, cos, K_cache, V_cache, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings, tic=None, rope=False):
+def run_thundermla(QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings, tic=None):
     q_heads = QRot.shape[2]
     if tic is None:
         Semaphore.zero_()
         tic = 1
     O = torch.zeros_like(QV)
-    Q_all = torch.concat([QV, QRot], dim=-1).contiguous()
-    KV_all = torch.cat([V_cache, K_cache], dim=-1).contiguous()
     softmax_scale = 1.0 / math.sqrt(D_Main+D_Rot)
     torch.cuda.synchronize()
     mla_decode_fn = mla_decode.mla_decode_8_heads if q_heads == 8 else mla_decode.mla_decode
-    if rope:
-        if Timings is not None:
-            mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, tic, Timings)
-            mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, 1-tic, Timings)
-        else:
-            mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, tic)
-            mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, 1-tic)
-        torch.cuda.synchronize()
+    
+    if Timings is not None:
+        mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, tic, Timings)
+        mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, 1-tic, Timings)
     else:
-        if Timings is not None:
-            mla_decode_fn(Instructions, QRot, QV, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, tic, Timings)
-        else:
-           mla_decode_fn(Instructions, QRot, QV, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, tic)
+        mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, tic)
+        mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, 1-tic)
+    torch.cuda.synchronize()
     return O, Timings
 
-def profile_thundermla(QRot, QV, sin, cos, K_cache, V_cache, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings, ITERS=100, rope=False):
+def profile_thundermla(QRot, QV, sin, cos, K_cache, V_cache, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings, ITERS=100):
     q_heads = QRot.shape[2]
     Semaphore.zero_()
     O = torch.zeros_like(QV)
     softmax_scale = 1.0 / math.sqrt(D_Main+D_Rot)
     # execute once to warm up
     mla_decode_fn = mla_decode.mla_decode_8_heads if q_heads == 8 else mla_decode.mla_decode
-    if rope:
-        if Timings is not None:
-            mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, 1, Timings)
-        else:
-            mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, 1)
+
+    if Timings is not None:
+        mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, 1, Timings)
     else:
-        if Timings is not None:
-            mla_decode_fn(Instructions, QRot, QV, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, 1, Timings)
-        else:
-            mla_decode_fn(Instructions, QRot, QV, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, 1)
+        mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, 1)
     torch.cuda.synchronize()
     t0 = time.time()
     for it in range(ITERS):
-        if rope:
-            if Timings is not None:
-                mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, it%2, Timings)
-            else:
-               mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, it%2)
+        if Timings is not None:
+            mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, it%2, Timings)
         else:
-            if Timings is not None:
-                mla_decode_fn(Instructions, QRot, QV, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, it%2, Timings)
-            else:
-                mla_decode_fn(Instructions, QRot, QV, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, it%2)
+            mla_decode_fn(Instructions, QRot, QV, sin, cos, K_cache, V_cache, Table, O, O_scratch, Lvec_scratch, Semaphore, softmax_scale, it%2)
+
     torch.cuda.synchronize()
     t1 = time.time()
     return (t1-t0) / ITERS
 
-def run_mla_torch(QRot, QV, K_cache, V_cache, Lengths, Table, new_tokens, use_rope=False):
+def run_mla_torch(QRot, QV, K_cache, V_cache, K_new, V_new, Lengths, Table):
     Q = torch.concat([QRot, QV], dim=-1)
     q_heads = Q.shape[2]
+    new_tokens = K_new.shape[1]
 
-    if use_rope:
+    # RoPE for Q
+    sin, cos = create_rope_embeddings(Lengths, new_tokens)
+    QRot_rope_applied = apply_rope(QRot, Lengths, sin, cos)
+    Q = torch.concat([QRot_rope_applied, QV], dim=-1)
 
-        sin, cos = create_rope_embeddings(Lengths, new_tokens)
-        QRot_rope_applied = apply_rope(QRot, Lengths, sin, cos)
-        Q = torch.concat([QRot_rope_applied, QV], dim=-1)
-
-    else:
-
-        Q = torch.concat([QRot, QV], dim=-1)
-
+    # [B, L, D]
     full_K = torch.cat([K_cache, V_cache], dim=-1)[Table].reshape(Q.shape[0], -1, Q.shape[-1])
     full_V = V_cache[Table].reshape(Q.shape[0], -1, QV.shape[-1])
+
+    k_new_expanded = torch.cat([K_new, V_new], dim=-1)
+    print("kcache", full_K.shape)
+    print("vcache", full_V.shape)
+    print("knew", k_new_expanded.shape)
+    print("vnew", V_new.shape)
+
+    # [B, L, D] cat [B, R, D] -> [B, L+R, D]
+    full_K = torch.cat([full_K, k_new_expanded], dim=-2)
+    full_V = torch.cat([full_V, V_new], dim=-2)
+
     softmax_scale = 1.0 / math.sqrt(D_Main+D_Rot)
     O = torch.zeros_like(QV)
     for b, l in enumerate(Lengths):
@@ -222,38 +218,46 @@ def run_mla_torch(QRot, QV, K_cache, V_cache, Lengths, Table, new_tokens, use_ro
         ).transpose(1, 2)
     return O
 
-def main(seq_lengths, new_tokens, q_heads=16, use_rope=False):
+def main(seq_lengths, new_tokens, q_heads=16, use_rope=True):
     print(f' ----------- starting seq_lengths: {seq_lengths} new_tokens: {new_tokens} q_heads: {q_heads} use_rope: {use_rope} -----------')
     seq_lengths = sorted(seq_lengths)
-    QRot, QV, K_cache, V_cache, Lengths, Table = init_arguments(seq_lengths, new_tokens, q_heads)
-    ref = run_mla_torch(QRot, QV, K_cache, V_cache, Lengths, Table, new_tokens, use_rope=use_rope)
+    QRot, QV, K_cache, V_cache, Lengths, Table, K_new, V_new = init_arguments(seq_lengths, new_tokens, q_heads)
+    ref = run_mla_torch(QRot, QV, K_cache, V_cache, K_new, V_new, Lengths, Table)
     Instructions, O_scratch, Lvec_scratch, Semaphore, Timings = create_thundermla_arguments(seq_lengths, new_tokens, q_heads)
     sin, cos = create_rope_embeddings(Lengths, new_tokens)
-    O, Timings = run_thundermla(QRot, QV, sin, cos, K_cache, V_cache, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings, rope=use_rope)
+    O, Timings = run_thundermla(QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings)
 
-    print("ref mean:", torch.mean(ref.abs()))
-    print("Kernel output mean", torch.mean(O.abs()))
-    print("Max absolute diff", torch.max(torch.abs(O - ref)))
-    print("Avg absolute diff", torch.mean(torch.abs(O - ref)))
 
-    time_per_iter = profile_thundermla(QRot, QV, sin, cos, K_cache, V_cache, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings, rope=use_rope)
-    print(f"Time per iter: {time_per_iter*1000} ms")
+    is_correct = torch.isclose(O, ref, atol=1e-3, rtol=1e-3).all(dim=(-2, -1)).cpu()
+    if not is_correct.all():
+        print("\nError pattern:")
+        print("batch   sequence")
+        for b, s in enumerate(is_correct):
+            if s.all():
+                continue
+            print(f"{b:6d}   ", end="")
+            errstring = ["✓" if e else "✗" for e in s]
+            print(" ".join(errstring))
+            print()
+
+
+    # time_per_iter = profile_thundermla(QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings)
+    # print(f"Time per iter: {time_per_iter*1000} ms")
 
     # save_gantt_chart(Timings, Instructions, name='new')
 
 if __name__ == "__main__":
-    use_rope = True if len(sys.argv) > 1 and sys.argv[1] == "rope" else False
-    main([1], 1, 16, use_rope)
-    main([32], 1, 16, use_rope)
-    main([64], 1, 16, use_rope)
-    main([4641,45118,1730,1696], 4, 16, use_rope)
-    main([65536], 1, 16, use_rope)
-    main([512]*64, 2, 16, use_rope)
-    main([4096]*132, 4, 16, use_rope)
-    main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 16, use_rope)
+    main([1], 4, 16)
+    main([32], 4, 16)
+    main([64], 1, 16)
+    main([4641,45118,1730,1696], 4, 16)
+    main([65536], 1, 16)
+    main([512]*64, 2, 16)
+    main([4096]*132, 4, 16)
+    main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 16)
     
-    main([4641,45118,1730,1696], 4, 8, use_rope)
-    main([65536], 1, 8, use_rope)
-    main([512]*64, 2, 8, use_rope)
-    main([4096]*132, 4, 8, use_rope)
-    main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 8, use_rope)
+    # # main([4641,45118,1730,1696], 4, 8, use_rope)
+    # main([65536], 1, 8, use_rope)
+    # main([512]*64, 2, 8, use_rope)
+    # main([4096]*132, 4, 8, use_rope)
+    # main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 8, use_rope)
