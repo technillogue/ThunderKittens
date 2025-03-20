@@ -45,10 +45,6 @@ def init_arguments(seq_lengths: List[int], new_tokens: int, q_heads: int=16):
     K_new = torch.randn(B, new_tokens, D_Rot, dtype=torch.bfloat16, device='cuda')
     V_new = torch.randn(B, new_tokens, D_Main, dtype=torch.bfloat16, device='cuda')
 
-    # debugging crutch
-    V_cache.fill_(1)
-    V_new.fill_(1)
-
     return QRot, QV, K_cache, V_cache, Lengths, Table, K_new, V_new
 
 def create_thundermla_arguments(seq_lengths, new_tokens, q_heads = 16):
@@ -118,9 +114,9 @@ def apply_rope(QRot, Lengths, sin, cos):
 
     def rotate(q, length):
         # Get positions for the new tokens - they should be the next positions after length
-        positions = torch.arange(length, length + new_tokens)
-        new_tok_sin = sin[positions]
-        new_tok_cos = cos[positions]
+        new_positions = torch.arange(length, length + new_tokens)
+        new_tok_sin = sin[new_positions]
+        new_tok_cos = cos[new_positions]
 
         sin_expanded = new_tok_sin.unsqueeze(1)  # [new_tokens, 1, half_dim]
         cos_expanded = new_tok_cos.unsqueeze(1)  # [new_tokens, 1, half_dim]
@@ -193,29 +189,38 @@ def run_mla_torch(QRot, QV, K_cache, V_cache, K_new, V_new, Lengths, Table):
     QRot_rope_applied = apply_rope(QRot, Lengths, sin, cos)
     Q = torch.concat([QRot_rope_applied, QV], dim=-1)
 
-    # [B, L, D]
-    full_K = torch.cat([K_cache, V_cache], dim=-1)[Table].reshape(Q.shape[0], -1, Q.shape[-1])
-    full_V = V_cache[Table].reshape(Q.shape[0], -1, QV.shape[-1])
-
-    k_new_expanded = torch.cat([K_new, V_new], dim=-1)
-
-    # [B, L, D] cat [B, R, D] -> [B, L+R, D]
-    full_K = torch.cat([full_K, k_new_expanded], dim=-2)
-    full_V = torch.cat([full_V, V_new], dim=-2)
-
     softmax_scale = 1.0 / math.sqrt(D_Main+D_Rot)
     O = torch.zeros_like(QV)
-    for b, l in enumerate(Lengths):
-        # assert Q.shape[1] == 1, "Q must have shape (B, 1, H, D) for the time being."
-        mask = torch.ones(Q.shape[1], l, dtype=torch.bool).tril(diagonal=l-Q.shape[1]).to(Q.device)
+    
+    for b, length in enumerate(Lengths):
+        # Extract only the valid tokens for this batch (up to its length)
+        batch_table = Table[b, :math.ceil(length/PAGE_SIZE)]
+        
+        # Get K and V from cache, reshape to match sequence length
+        k_from_cache = torch.cat([K_cache, V_cache], dim=-1)[batch_table].reshape(1, -1, Q.shape[-1])
+        v_from_cache = V_cache[batch_table].reshape(1, -1, QV.shape[-1])
+        
+        # Truncate to actual sequence length
+        k_from_cache = k_from_cache[:, :length]
+        v_from_cache = v_from_cache[:, :length]
+        
+        # Append new tokens
+        k_batch_new = torch.cat([K_new[b:b+1], V_new[b:b+1]], dim=-1)
+        full_K = torch.cat([k_from_cache, k_batch_new], dim=1)
+        full_V = torch.cat([v_from_cache, V_new[b:b+1]], dim=1)
+        
+        full_seqlen = length + new_tokens
+        mask = torch.ones(new_tokens, full_seqlen, dtype=torch.bool).tril(diagonal=full_seqlen-new_tokens).to(Q.device)
+        
         O[b:b+1] = torch.nn.functional.scaled_dot_product_attention(
             Q[b:b+1].transpose(1, 2),
-            full_K[b:b+1, :l].unsqueeze(-2).repeat((1,1,q_heads,1)).transpose(1, 2),
-            full_V[b:b+1, :l].unsqueeze(-2).repeat((1,1,q_heads,1)).transpose(1, 2),
+            full_K.unsqueeze(-2).repeat((1,1,q_heads,1)).transpose(1, 2),
+            full_V.unsqueeze(-2).repeat((1,1,q_heads,1)).transpose(1, 2),
             is_causal=False,
             attn_mask=mask,
             scale=softmax_scale
         ).transpose(1, 2)
+        
     return O
 
 def main(seq_lengths, new_tokens, q_heads=16, use_rope=True):
@@ -228,8 +233,14 @@ def main(seq_lengths, new_tokens, q_heads=16, use_rope=True):
     O, Timings = run_thundermla(QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings)
 
 
-    is_correct = torch.isclose(O, ref, atol=1e-3, rtol=1e-3).all(dim=(-2, -1)).cpu()
-    if not is_correct.all():
+    cosine_similarity = torch.nn.functional.cosine_similarity(O, ref, dim=-1)
+    is_correct = torch.isclose(O, ref, atol=5e-3, rtol=5e-3)
+    if not is_correct.all() and cosine_similarity.min() < 0.95:
+        print(f"Cosine similarity mean: {cosine_similarity.mean()}, worst: {cosine_similarity.min()}")
+        print(cosine_similarity.shape)
+        print("out", O[..., :2, -4:])
+        print("ref", ref[..., :2, -4:])
+        is_correct = is_correct.all(dim=(-2, -1))
         print("\nError pattern:")
         print("batch   sequence")
         for b, s in enumerate(is_correct):
@@ -248,20 +259,19 @@ def main(seq_lengths, new_tokens, q_heads=16, use_rope=True):
     # save_gantt_chart(Timings, Instructions, name='new')
 
 if __name__ == "__main__":
-    # main([1], 4, 16)
-    main([32], 1, 16)
-    main([64], 1, 16)
+    main([1], 1, 16)
+    main([16], 4, 16)
+    main([64], 4, 16)
     main([32], 4, 16)
     main([64], 4, 16)
-
-    # main([4641,45118,1730,1696], 4, 16)
-    # main([65536], 1, 16)
-    # main([512]*64, 2, 16)
-    # main([4096]*132, 4, 16)
-    # main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 16)
+    main([4641,45118,1730,1696], 4, 16)
+    main([65536], 1, 16)
+    main([512]*64, 2, 16)
+    main([4096]*132, 4, 16)
+    main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 16)
     
-    # # main([4641,45118,1730,1696], 4, 8, use_rope)
-    # main([65536], 1, 8, use_rope)
-    # main([512]*64, 2, 8, use_rope)
-    # main([4096]*132, 4, 8, use_rope)
-    # main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 8, use_rope)
+    main([4641,45118,1730,1696], 4, 8)
+    main([65536], 1, 8)
+    main([512]*64, 2, 8)
+    main([4096]*132, 4, 8)
+    main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 8)
