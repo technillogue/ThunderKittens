@@ -78,12 +78,13 @@ template<int D=128, int WINDOW_SIZE = 256> struct attn_fwd_template {
             int warp_index_in_group = warpgroup::warpid() % 4;
             int warp_row_offset = 16 * warp_index_in_group;
 
-            int diagonal_offset = key_start_position - query_start_position - warp_row_offset;
-            // auren thinks query_start_position - key_start_position + warp_row_offset;
-            int window_start_offset = diagonal_offset + WINDOW_SIZE;
+            int causal_offset = key_start_position - query_start_position - warp_row_offset;
+            int window_offset = diagonal_offset + WINDOW_SIZE;
 
+            // are we completely to the right of the diagonal (key - query = 0)?
             bool completely_future = key_start_position > query_start_position;
-            bool completely_past = key_start_position + layout::kv_tile::rows <= query_start_position - WINDOW_SIZE;
+            // rightmost part of key is smaller than query = past
+            bool completely_past = query_start_position - key_start_position - layout::kv_tile::rows >= WINDOW_SIZE;
 
             // we can skip these tiles! we didn't even need to load them
             if (completely_future || completely_past) {
@@ -92,8 +93,7 @@ template<int D=128, int WINDOW_SIZE = 256> struct attn_fwd_template {
             }
 
             bool diagonal_passes_through_tile = query_start_position - key_start_position < layout::kv_tile::rows;
-            bool tile_after_window_start = query_start_position - key_start_position >= layout::kv_tile::rows - WINDOW_SIZE;
-
+            bool tile_after_window_start = query_start_position - key_start_position >= layout::qo_tile::cols - WINDOW_SIZE;
 
             // A = Q @ K.T
             warpgroup::mm_ABt(args.state.att_block, args.scratch.q[warpgroup::groupid()], args.input.k);
@@ -104,10 +104,10 @@ template<int D=128, int WINDOW_SIZE = 256> struct attn_fwd_template {
 
             // apply causal mask
             if (diagonal_passes_through_tile)
-                tril(args.state.att_block, args.state.att_block, diagonal_offset, neginf);
+                tril(args.state.att_block, args.state.att_block, causal_offset, neginf);
             // apply window
             if (tile_after_window_start) // window diagonal passes through tile
-                triu(args.state.att_block, args.state.att_block, window_start_offset, neginf);
+                triu(args.state.att_block, args.state.att_block, window_offset, neginf);
 
             // softmax
             right_fill(args.state.att_block, args.state.att_block, args.globals.K.rows - args.iter*layout::kv_tile::rows, neginf);
