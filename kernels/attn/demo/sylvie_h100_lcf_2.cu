@@ -83,7 +83,10 @@ template<int D, bool causal, bool window, int WINDOW_SIZE = 256> struct attn_fwd
             warpgroup::sync(warpgroup::groupid());
         }
         __device__ static inline void compute(consumer_compute_args<layout> args) {
-            int qidx = (args.common.seq*NUM_WORKERS+warpgroup::groupid())*layout::qo_tile::rows;
+            int query_block_idx = args.common.seq * NUM_WORKERS;
+            int query_warp_block_offset = query_block_idx + warpgroup::groupid(); // warp position within warpgroup
+
+            int qidx = query_warp_block_offset * layout::qo_tile::rows;
             int kvidx = args.iter*layout::kv_tile::rows;
             /*
             How to know whether to skip a whole block if it's causal?
@@ -94,7 +97,9 @@ template<int D, bool causal, bool window, int WINDOW_SIZE = 256> struct attn_fwd
             * causal is True and K/V index is greater than Q index
             * which happens when args.iter*layout::kv_tile::rows > args.common.seq*NUM_WORKERS+warpgroup::groupid()
             */
-            if ((!causal || kvidx <= qidx) && (!window || (qidx - kvidx - layout::kv_tile::rows) < WINDOW_SIZE)) {
+            bool not_causal_masked = kvidx <= qidx;
+            bool not_window_masked = (qidx - kvidx - layout::kv_tile::rows) < WINDOW_SIZE;
+            if ((!causal || not_causal_masked) && (!window || not_window_masked) {
                 constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
                 // A = Q @ K.T
                 warpgroup::mm_ABt(args.state.att_block, args.scratch.q[warpgroup::groupid()], args.input.k);
@@ -105,15 +110,21 @@ template<int D, bool causal, bool window, int WINDOW_SIZE = 256> struct attn_fwd
                 // blocks are wider than they are tall, so we have mulitple blocks on the diagonal
                 // kvidx - qidx gives the (negative) offset based on block
                 // 16 * (warpgroup::warpid() % 4) gives the offset based on the warp
-                int causal_offset = kvidx - qidx - 16 * (warpgroup::warpid() % 4);
+
+                int warp_index_in_group = warpgroup::warpid() % 4;
+                int warp_row_offset = 16 * warp_index_in_group;
+                int causal_offset = kvidx - qidx - warp_row_offset;
+
+		bool causal_intersects_tile = qidx - kvidx < layout::qo_tile::cols;
                 if (causal) {
-                    // if qidx - kvidx is less than the number of columns, this tile passes the diagonal
-                    if (qidx - kvidx < layout::qo_tile::cols) {
+                    // if qidx - kvidx is less than the number of columns, this tile passes through the diagonal
+                    if (causal_intersects_tile) {
                         tril(args.state.att_block, args.state.att_block, causal_offset, base_types::constants<float>::neg_infty());
                     }
                 }
+                bool window_intersects_tile = qidx - kvidx >= layout::qo_tile::cols - WINDOW_SIZE;
                 if (window) {
-                    if (qidx - kvidx >= layout::qo_tile::cols - WINDOW_SIZE) {
+                    if (window_intersects_tile) {
                         // if the window passes the end of the tile, we need to mask the end
                         triu(args.state.att_block, args.state.att_block, causal_offset + WINDOW_SIZE, base_types::constants<float>::neg_infty());
                     }

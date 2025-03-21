@@ -79,7 +79,7 @@ template<int D=128, int WINDOW_SIZE = 256> struct attn_fwd_template {
             int warp_row_offset = 16 * warp_index_in_group;
 
             int causal_offset = key_start_position - query_start_position - warp_row_offset;
-            int window_offset = diagonal_offset + WINDOW_SIZE;
+            int window_offset = causal_offset + WINDOW_SIZE;
 
             // are we completely to the right of the diagonal (key - query = 0)?
             bool completely_future = key_start_position > query_start_position;
