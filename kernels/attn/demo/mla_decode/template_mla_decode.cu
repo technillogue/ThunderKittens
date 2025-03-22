@@ -112,7 +112,7 @@ struct partial_template {
                                    args.instruction[3]};
         // which batch is assigned to this worker
         args.common.q_batch_idx =  args.instruction[4];
-        // which chunk of tokens is assigned to this worker
+        // which chunk of new tokens is assigned to this worker (divisible by 4)
         args.common.q_seq_idx   =  args.instruction[5];
         // positions of KV cache assigned to this partial split. Worker will lookup page mapping from Table. positions may not be aligned to PAGE_SIZE.
         args.common.start_pos   =  args.instruction[6];
@@ -287,7 +287,26 @@ struct partial_template {
                 // QK @ V -> [NEW_TOKENS * Q_HEADS, D]
                 internal_compute<false, true>(args);
 
-                // TODO: writeout KV update
+                if (warpgroup::groupid() == 0) {
+                    // write out KV update
+
+                    auto num_new_tokens = args.globals.K_new.rows();
+                    auto eos_page_idx = args.common.length/PAGE_SIZE;
+                    auto new_eos_page_idx = (args.common.length + num_new_tokens - 1)/PAGE_SIZE;
+
+                    if (eos_page_idx == new_eos_page_idx) {
+                        auto eos_page_addr = args.globals.Table[coord<>{args.common.q_batch_idx, eos_page_idx}];
+                        auto row_offset_within_page = args.common.length % PAGE_SIZE;
+                        
+                        // if (threadIdx.x == 0) {
+                        //     printf("Warp %d, Group %d: KV update: seqlen=%d, num_new_tokens=%d, update_page_id=%d, within_page_idx=%d (%d), dst_offset_within_tile=%d\n", warpgroup::warpid(), warpgroup::groupid(), args.common.length, num_new_tokens, update_page_id, within_page_idx, within_page_idx * NUM_ROWS, dst_offset_within_tile);
+                        // }
+
+                        kittens::store_masked(args.globals.K_cache, args.input.kcache, {0, eos_page_addr, 0, 0}, row_offset_within_page, 0, num_new_tokens);
+                        kittens::store_masked(args.globals.V_cache, args.input.vcache, {0, eos_page_addr, 0, 0}, row_offset_within_page, 0, num_new_tokens);
+                    }
+                }
+                group<8>::sync(17);
             }
 
             if(warpgroup::laneid() == 0) arrive(args.inputs_finished, WARPGROUP_WARPS); // done!

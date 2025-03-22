@@ -116,6 +116,73 @@ __device__ static inline void store(const GL &dst, const ST &src, const COORD &i
 }
 
 /**
+ * @brief Stores a slice of rows from a shared memory tile into global memory, with flexible offsetting.
+ * 
+ *        Source Tile                  Destination Tile
+ *   +------------------+            +------------------+
+ *   |                  |            |                  |
+ *   |    src_offset    |            |    dst_offset    |
+ *   |                  |            |                  |
+ *   |                  |            +------------------+
+ *   |                  |            |        ↑         |
+ *   +------------------+            |        |         |
+ *   |        ↑         |            |     num_rows     |
+ *   |        |         |            |        |         |
+ *   |     num_rows     |            |        ↓         |
+ *   |        |         |            +------------------+
+ *   |        ↓         |            |                  |
+ *   +------------------+            |                  |
+ *   |                  |            |                  |
+ *   |                  |            |                  |
+ *   |                  |            |                  |
+ *   +------------------+            +------------------+
+
+ * 
+ *
+ * @tparam ST The type of the shared tile.
+ * @param[out] dst The destination global memory array.
+ * @param[in] src The source shared memory tile.
+ * @param row_mask_start[in] Skip rows before row_mask_start in both the source and destination arrays.
+ * @param row_mask_end[in] Skip rows after row_mask_end in both the source and destination arrays.
+ * @param row_offset_dst[in] Offset to add to the destination row index.
+ */
+template<ducks::st::all ST, ducks::gl::all GL, ducks::coord::tile COORD=coord<ST>, int N_THREADS=WARP_THREADS>
+__device__ static inline void store_masked(const GL &dst, const ST &src, const COORD &idx, const int row_offset_dst, const int row_offset_src, const int num_rows) {
+    using T = typename ST::dtype;
+    constexpr auto axis = dim::ROW;
+    const int row_stride = dst.template stride<axis>();
+    // we can handle this many rows each time we run a memcpy_async
+    constexpr int elem_per_memcpy = sizeof(float4)/sizeof(typename ST::dtype);
+    constexpr int memcpy_per_row = src.cols / elem_per_memcpy;
+    constexpr int total_calls = (src.height*src.width * kittens::TILE_ROW_DIM<T>*kittens::TILE_COL_DIM<T> + N_THREADS*elem_per_memcpy-1) / (N_THREADS*elem_per_memcpy); // round up
+
+    coord<> unit_coord = idx.template unit_coord<axis, 3>();
+    typename GL::dtype *dst_ptr = (typename GL::dtype*)&dst[unit_coord];
+    uint32_t src_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&src.data[0]));
+    int laneid = threadIdx.x % N_THREADS;
+
+    #pragma unroll
+    for(int i = 0; i < total_calls; i++) {
+
+        int load_idx = i * N_THREADS + laneid;
+        
+        int row = load_idx / memcpy_per_row;
+        int col = (load_idx*elem_per_memcpy) % src.cols;
+
+        // Skip rows before row_offset
+        if (row < row_offset_src || row >= row_offset_src + num_rows) {
+            continue;
+        }
+
+        auto dst_row = row - row_offset_src + row_offset_dst;
+
+        float4 tmp;
+        move<float4>::lds(tmp, src.idx(src_ptr, {row, col}));
+        move<float4>::stg((float4*)&dst_ptr[dst_row*row_stride + col], tmp);
+    }
+}
+
+/**
  * @brief Asynchronously loads data from global memory into a shared memory tile.
  *
  * @tparam ST The type of the shared tile.
