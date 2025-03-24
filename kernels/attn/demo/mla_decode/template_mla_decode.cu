@@ -13,7 +13,7 @@ constexpr T cdiv(T a, T b) {
     return (a + b - 1) / b;
 }
 
-static constexpr int QKRot_D = 64, QKRot_Dd2 = 64/2, QVO_D = 512, QVO_Dd2 = QVO_D/2, NUM_ROWS = 32, PAGE_SIZE = 256;
+static constexpr int QKRot_D = 64, QKRot_Dd2 = QKRot_D/2, QVO_D = 512, QVO_Dd2 = QVO_D/2, NUM_ROWS = 32, PAGE_SIZE = 256;
 using qrot_tile           = st_bf<64, QKRot_D>;
 using qvo_tile            = st_bf<64, QVO_D>;
 // batch, depth, rows, cols
@@ -149,7 +149,7 @@ struct partial_template {
 #endif
             // split up Q tile across warps (tokens) and dim (groups) (total 8 ways)
             // each warp loads one token's worth of QRot and QV
-            auto qrot_st = subtile_inplace<16, QKRot_D/2>(args.scratch.qrot, {warpgroup::warpid(), warpgroup::groupid()});
+            auto qrot_st = subtile_inplace<16, QKRot_Dd2>(args.scratch.qrot, {warpgroup::warpid(), warpgroup::groupid()});
             load_async(qrot_st, args.globals.Q, {args.common.q_batch_idx, args.common.q_seq_idx + warpgroup::warpid(), 0, warpgroup::groupid()});
             auto qvo_st = subtile_inplace<16, QVO_Dd2>(args.scratch.qvo, {warpgroup::warpid(), warpgroup::groupid()});
             load_async(qvo_st, args.globals.QV, {args.common.q_batch_idx, args.common.q_seq_idx + warpgroup::warpid(), 0, warpgroup::groupid()});
