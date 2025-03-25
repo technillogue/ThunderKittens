@@ -179,6 +179,18 @@ __device__ inline float2 packed_shfl_sync<float2>(uint32_t mask, const float2 &f
 #endif
 
 /**
+ * @brief Perform a ceiling division operation.
+ * @tparam T The type of the value to be divided.
+ * @param a[in] numerator.
+ * @param b[in] denominator.
+ * @return The result of the ceiling division.
+ */
+template <typename T>
+constexpr T cdiv(T a, T b) {
+    return (a + b - 1) / b;
+}
+
+/**
  * @brief Dummy structure for alignment purposes. Needed for WGMMA and TMA calls.
  */
 struct KITTENS_DEFAULT_ALIGN alignment_dummy { int dummy; };
