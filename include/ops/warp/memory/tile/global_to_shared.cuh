@@ -154,31 +154,28 @@ __device__ static inline void store_masked(const GL &dst, const ST &src, const C
     // we can handle this many rows each time we run a memcpy_async
     constexpr int elem_per_memcpy = sizeof(float4)/sizeof(typename ST::dtype);
     constexpr int memcpy_per_row = src.cols / elem_per_memcpy;
-    constexpr int total_calls = (src.height*src.width * kittens::TILE_ROW_DIM<T>*kittens::TILE_COL_DIM<T> + N_THREADS*elem_per_memcpy-1) / (N_THREADS*elem_per_memcpy); // round up
+
+    constexpr int tile_height = src.height*kittens::TILE_ROW_DIM<T>;
+    constexpr int tile_width = src.width*kittens::TILE_COL_DIM<T>;
+    assert((num_rows + row_offset_src) <= tile_height);
+    constexpr int total_calls = cdiv(tile_width, N_THREADS*elem_per_memcpy);
 
     coord<> unit_coord = idx.template unit_coord<axis, 3>();
     typename GL::dtype *dst_ptr = (typename GL::dtype*)&dst[unit_coord];
     uint32_t src_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&src.data[0]));
     int laneid = threadIdx.x % N_THREADS;
 
-    #pragma unroll
-    for(int i = 0; i < total_calls; i++) {
+    for(int row = row_offset_src; row < row_offset_src + num_rows; row++) {
+        // #pragma unroll
+        for (int col = laneid*elem_per_memcpy; col < tile_width; col += N_THREADS*elem_per_memcpy) {
+            auto dst_row = row - row_offset_src + row_offset_dst;
 
-        int load_idx = i * N_THREADS + laneid;
-        
-        int row = load_idx / memcpy_per_row;
-        int col = (load_idx*elem_per_memcpy) % src.cols;
-
-        // Skip rows before row_offset
-        if (row < row_offset_src || row >= row_offset_src + num_rows) {
-            continue;
+            // shared -> register
+            float4 tmp;
+            move<float4>::lds(tmp, src.idx(src_ptr, {row, col}));
+            // register -> global
+            move<float4>::stg((float4*)&dst_ptr[dst_row*row_stride + col], tmp);
         }
-
-        auto dst_row = row - row_offset_src + row_offset_dst;
-
-        float4 tmp;
-        move<float4>::lds(tmp, src.idx(src_ptr, {row, col}));
-        move<float4>::stg((float4*)&dst_ptr[dst_row*row_stride + col], tmp);
     }
 }
 
