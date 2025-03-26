@@ -131,7 +131,7 @@ def apply_rope(QRot, Lengths, sin, cos):
 
     # Could just do this at once as a batch operation, but good enough for now
     for batch_idx in range(len(Lengths)):
-        seq_length = Lengths[batch_idx]
+        seq_length = Lengths[batch_idx] # this will be from rope_seqlen instead of seqlen
         QRot_clone[batch_idx] = rotate(QRot_clone[batch_idx], seq_length)
 
     return QRot_clone

@@ -91,6 +91,10 @@ struct partial_layout {
         int start_pos; // first token handled in this partial
         int end_pos; // One past the last position to load
         int length; // the length of the overall sequence in question (not including new tokens)
+        // if speculative prefill is used and some tokens are dropped, length is the physical length
+        // and rope_seqlen is the logical length used for positional embedding
+        // e.g. original sequence [1, 2, 3, 4], sparse sequence [2, 4], length=2, rope_length=4
+        int rope_seqlen;
     };
     struct consumer_state {
         col_vec<rt_fl<16, kcache_tile::rows>> max_vec, norm_vec;
@@ -119,6 +123,7 @@ struct partial_template {
         args.common.end_pos     =  args.instruction[7];
         // valid seqlen of the assigned batch
         args.common.length      =  args.instruction[8];
+        args.common.rope_seqlen =  args.instruction[9];
         args.num_iters          = cdiv(args.common.end_pos - args.common.start_pos, NUM_ROWS);
         
     }
@@ -166,8 +171,8 @@ struct partial_template {
             rt_bf<16, QKRot_Dd2> temp_sin_rt;
             rt_bf<16, QKRot_Dd2> temp_cos_rt;
 
-            load(cos_rv, args.globals.cos, {0, 0, args.common.length + args.common.q_seq_idx + warpgroup::warpid(), 0});
-            load(sin_rv, args.globals.sin, {0, 0, args.common.length + args.common.q_seq_idx + warpgroup::warpid(), 0});
+            load(cos_rv, args.globals.cos, {0, 0, args.common.rope_seqlen + args.common.q_seq_idx + warpgroup::warpid(), 0});
+            load(sin_rv, args.globals.sin, {0, 0, args.common.rope_seqlen + args.common.q_seq_idx + warpgroup::warpid(), 0});
 
             auto other_qrot_st = subtile_inplace<16, QKRot_Dd2>(args.scratch.qrot, {warpgroup::warpid(), 1 - warpgroup::groupid()});
             
