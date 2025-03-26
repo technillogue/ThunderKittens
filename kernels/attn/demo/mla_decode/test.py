@@ -21,20 +21,21 @@ from scheduler_v2 import backward_schedule
 from timings import save_gantt_chart
 from tqdm import tqdm
 
-torch.manual_seed(0)
-
 D_Main, D_Rot = 512, 64
 PAGE_SIZE = 256
-# H = 16                  # set by q_heads
 NUM_PAGES = 10000        # number of pages in cache
 NUM_PROCESSORS = 132    # number of processors
-MAX_NUM_PAGES = int(1e6) // PAGE_SIZE
+seed = torch.randint(1000000, (1,)).item()
 
 ENABLE_TIMINGS = True
 
 def init_arguments(seq_lengths: List[int], new_tokens: int, q_heads: int=16):
+    # fix the seed on every iteration so that the each test gets the same initial conditions
+    torch.manual_seed(seed)
 
     B = len(seq_lengths)
+    max_pages_in_batch = math.ceil((max(seq_lengths) / PAGE_SIZE)) + 10  # hold new tokens in cache
+    assert B * max_pages_in_batch <= NUM_PAGES, f"B * max_pages_in_batch = {B * max_pages_in_batch} > NUM_PAGES = {NUM_PAGES}"
 
     # Need to initialize QRot, QV, K_cache, V_cache, Lengths, Table    
     QRot    = torch.randn(B, new_tokens, q_heads, D_Rot, dtype=torch.bfloat16, device='cuda')
@@ -42,7 +43,7 @@ def init_arguments(seq_lengths: List[int], new_tokens: int, q_heads: int=16):
     K_cache = torch.randn(NUM_PAGES, PAGE_SIZE, D_Rot, dtype=torch.bfloat16, device='cuda')
     V_cache = torch.randn(NUM_PAGES, PAGE_SIZE, D_Main, dtype=torch.bfloat16, device='cuda')
     Lengths = torch.tensor(seq_lengths, dtype=torch.int32, device='cuda')
-    Table = torch.randint(0, NUM_PAGES, (B, MAX_NUM_PAGES), dtype=torch.int32, device='cuda')
+    Table = torch.randperm(NUM_PAGES, device='cuda', dtype=torch.int32)[:B*max_pages_in_batch].reshape(B, max_pages_in_batch)
     K_new = torch.randn(B, new_tokens, D_Rot, dtype=torch.bfloat16, device='cuda')
     V_new = torch.randn(B, new_tokens, D_Main, dtype=torch.bfloat16, device='cuda')
 
@@ -226,17 +227,17 @@ def run_mla_torch(QRot, QV, K_cache, V_cache, K_new, V_new, Lengths, Table):
 
 
 
-def retry_on_assertion(max_retries=100):
+def retry_on_assertion(max_retries=5):
     def decorator(func):
         def wrapper(*args, **kwargs):
             try:
                 return func(*args, **kwargs)
             except AssertionError:
                 print(f"\nAssertion failed, retrying up to {max_retries} times...")
-                for attempt in tqdm(range(max_retries)):
+                for attempt in tqdm(range( max_retries)):
                     try:
                         result = func(*args, **kwargs)
-                        print(f"\nSucceeded after {attempt + 2} attempts")
+                        print(f"\nSucceeded after {attempt + 1} failures")
                         return result
                     except AssertionError:
                         continue
@@ -248,9 +249,9 @@ def retry_on_assertion(max_retries=100):
 
 
 
-@retry_on_assertion()
+# @retry_on_assertion()
 def main(seq_lengths, new_tokens, q_heads=16, use_rope=True):
-    # print(f' ----------- starting seq_lengths: {seq_lengths} new_tokens: {new_tokens} q_heads: {q_heads} use_rope: {use_rope} -----------')
+    print(f' ----------- batches: {len(seq_lengths)} mean seq_length: {np.mean(seq_lengths)} new_tokens: {new_tokens} q_heads: {q_heads} use_rope: {use_rope} -----------')
     seq_lengths = sorted(seq_lengths)
     QRot, QV, K_cache, V_cache, Lengths, Table, K_new, V_new = init_arguments(seq_lengths, new_tokens, q_heads)
     ref = run_mla_torch(QRot, QV, K_cache, V_cache, K_new, V_new, Lengths, Table)
@@ -258,7 +259,27 @@ def main(seq_lengths, new_tokens, q_heads=16, use_rope=True):
     sin, cos = create_rope_embeddings(Lengths, new_tokens)
     O, Timings = run_thundermla(QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings)
 
-    # check kv update (last N tokens match between K_cache and K_new)
+    # Check attn output
+    # cosine similarity flattens error across heads and head_dim
+    cosine_similarity = torch.nn.functional.cosine_similarity(O.float().flatten(start_dim=-2, end_dim=-1), ref.float().flatten(start_dim=-2, end_dim=-1), dim=-1)
+    is_correct = cosine_similarity > 0.99
+    if not is_correct.all() and cosine_similarity.min() < 0.9:
+        print(f"Cosine similarity mean: {cosine_similarity.mean()}, worst: {cosine_similarity.min()}")
+        print(cosine_similarity.shape)
+        print("out", O[..., :2, -4:])
+        print("ref", ref[..., :2, -4:])
+        print("\nError pattern:")
+        print("batch   sequence")
+        for b, s in enumerate(is_correct):
+            if s.all():
+                continue
+            print(f"{b:6d}   ", end="")
+            errstring = ["✓" if e else "✗" for e in s]
+            print(" ".join(errstring))
+            print()
+        assert False
+
+    # Check kv update (last N tokens match between K_cache and K_new)
     for b in range(len(Lengths)):
         eos_page_idx = Lengths[b] // PAGE_SIZE
         eos_page_addr = Table[b, eos_page_idx]
@@ -281,25 +302,6 @@ def main(seq_lengths, new_tokens, q_heads=16, use_rope=True):
             print(new_V[..., :4])
             assert False, "V_cache update failed"
 
-    # flatten heads and head_dim
-    cosine_similarity = torch.nn.functional.cosine_similarity(O.float().flatten(start_dim=-2, end_dim=-1), ref.float().flatten(start_dim=-2, end_dim=-1), dim=-1)
-    is_correct = cosine_similarity > 0.99
-    if not is_correct.all() and cosine_similarity.min() < 0.9:
-        print(f"Cosine similarity mean: {cosine_similarity.mean()}, worst: {cosine_similarity.min()}")
-        print(cosine_similarity.shape)
-        print("out", O[..., :2, -4:])
-        print("ref", ref[..., :2, -4:])
-        print("\nError pattern:")
-        print("batch   sequence")
-        for b, s in enumerate(is_correct):
-            if s.all():
-                continue
-            print(f"{b:6d}   ", end="")
-            errstring = ["✓" if e else "✗" for e in s]
-            print(" ".join(errstring))
-            print()
-        assert False
-
 
     # time_per_iter = profile_thundermla(QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings)
     # print(f"Time per iter: {time_per_iter*1000} ms")
@@ -314,6 +316,7 @@ if __name__ == "__main__":
     main([4641,45118,1730,1696], 4, 16)
     main([65536], 1, 16)
     main([512]*64, 2, 16)
+    main([4096]*13, 4, 16)
     main([4096]*132, 4, 16)
     main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 16)
     

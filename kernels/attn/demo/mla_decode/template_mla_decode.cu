@@ -145,43 +145,47 @@ struct partial_template {
             // split up Q tile across warps (tokens) and dim (groups) (total 8 ways)
             // each warp loads one token's worth of QRot and QV
             auto qrot_st = subtile_inplace<16, QKRot_D/2>(args.scratch.qrot, {warpgroup::warpid(), warpgroup::groupid()});
-            load_async(qrot_st, args.globals.Q, {args.common.q_batch_idx, args.common.q_seq_idx + warpgroup::warpid(), 0, warpgroup::groupid()});
             auto qvo_st = subtile_inplace<16, QVO_Dd2>(args.scratch.qvo, {warpgroup::warpid(), warpgroup::groupid()});
-            load_async(qvo_st, args.globals.QV, {args.common.q_batch_idx, args.common.q_seq_idx + warpgroup::warpid(), 0, warpgroup::groupid()});
+            auto lookahead_idx = args.common.q_seq_idx + warpgroup::warpid();
+
+            // init local state
             zero(args.state.norm_vec);
             if(args.num_iters > 0) neg_infty(args.state.max_vec);
             else { one(args.state.max_vec); mul(args.state.max_vec, args.state.max_vec, -999999.f); }
             zero(args.state.o);
-            load_async_wait();
 
-            // Apply RoPE Embeddings to Q 
+            // Setup RoPE buffers
             row_vec<rt_bf<16, QKRot_Dd2>> cos_rv;
             row_vec<rt_bf<16, QKRot_Dd2>> sin_rv;
-
             rt_bf<16, QKRot_Dd2> temp_sin_rt;
             rt_bf<16, QKRot_Dd2> temp_cos_rt;
 
-            load(cos_rv, args.globals.cos, {0, 0, args.common.length + args.common.q_seq_idx + warpgroup::warpid(), 0});
-            load(sin_rv, args.globals.sin, {0, 0, args.common.length + args.common.q_seq_idx + warpgroup::warpid(), 0});
+            if (lookahead_idx < args.globals.K_new.rows()) {
+                load_async(qrot_st, args.globals.Q, {args.common.q_batch_idx, lookahead_idx, 0, warpgroup::groupid()});
+                load_async(qvo_st, args.globals.QV, {args.common.q_batch_idx, lookahead_idx, 0, warpgroup::groupid()});
+                
+                load(cos_rv, args.globals.cos, {0, 0, args.common.length + args.common.q_seq_idx + warpgroup::warpid(), 0});
+                load(sin_rv, args.globals.sin, {0, 0, args.common.length + args.common.q_seq_idx + warpgroup::warpid(), 0});
 
-            auto other_qrot_st = subtile_inplace<16, QKRot_Dd2>(args.scratch.qrot, {warpgroup::warpid(), 1 - warpgroup::groupid()});
-            
-            load(temp_cos_rt, qrot_st);
-            load(temp_sin_rt, other_qrot_st);
- 
-            // (q1, q2) -> (q1 * cos - q2 * sin, q1 * sin + q2 * cos)
-            mul_col(temp_cos_rt, temp_cos_rt, cos_rv);
-            mul_col(temp_sin_rt, temp_sin_rt, sin_rv);
-            
-            if (warpgroup::groupid() == 0) {
-                sub(temp_cos_rt, temp_cos_rt, temp_sin_rt);
-            } else {
-                add(temp_cos_rt, temp_cos_rt, temp_sin_rt);
+                load_async_wait();
+                auto other_qrot_st = subtile_inplace<16, QKRot_Dd2>(args.scratch.qrot, {warpgroup::warpid(), 1 - warpgroup::groupid()});
+                load(temp_cos_rt, qrot_st);
+                load(temp_sin_rt, other_qrot_st);
+    
+                // (q1, q2) -> (q1 * cos - q2 * sin, q1 * sin + q2 * cos)
+                mul_col(temp_cos_rt, temp_cos_rt, cos_rv);
+                mul_col(temp_sin_rt, temp_sin_rt, sin_rv);
+                
+                if (warpgroup::groupid() == 0) {
+                    sub(temp_cos_rt, temp_cos_rt, temp_sin_rt);
+                } else {
+                    add(temp_cos_rt, temp_cos_rt, temp_sin_rt);
+                }
             }
 
-            warpgroup::sync(6);
+            group<8>::sync(6);
             store(qrot_st, temp_cos_rt);
-            warpgroup::sync(5);
+            group<8>::sync(5);
 
 #ifdef KITTENS_TIMINGS
             if(group<8>::laneid() == 0) args.timings[2] = clock64();
@@ -282,14 +286,14 @@ struct partial_template {
                 // QK @ V -> [NEW_TOKENS * Q_HEADS, D]
                 internal_compute<false, true>(args);
 
-                if (warpgroup::groupid() == 0) {
+                if (warpgroup::groupid() == 0 and warpgroup::warpid() == 0) {
                     // write out KV update
 
                     auto num_new_tokens = args.globals.K_new.rows();
                     auto eos_page_idx = args.common.length/PAGE_SIZE;
-                    auto new_eos_page_idx = (args.common.length + num_new_tokens - 1)/PAGE_SIZE;
+                    auto space_left_in_page = PAGE_SIZE - (args.common.length % PAGE_SIZE);
 
-                    if (eos_page_idx == new_eos_page_idx) {
+                    if (num_new_tokens <= space_left_in_page) {
                         auto eos_page_addr = args.globals.Table[coord<>{args.common.q_batch_idx, eos_page_idx}];
                         auto row_offset_within_page = args.common.length % PAGE_SIZE;
                         
