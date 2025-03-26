@@ -36,6 +36,7 @@ using o_scratch_global    = kittens::gl<float, -1, -1, Q_HEADS, QVO_D, st_fl<16,
 template<int Q_HEADS=16>
 using lvec_scratch_global = kittens::gl<float,  1, -1, -1, Q_HEADS, sv_fl<16>>; // For partial O's
 using semaphore_global    = kittens::gl<int,    1,  1,  -1, -1>;            // 1 * 1 * uid * NEWTOKENS
+using rope_seqlens_global = kittens::gl<int,    1,  1,   1, -1>; // rope_seqlens is a tensor of int32, shape is (1, 1, 1, B,)
 
 template<int Q_HEADS=16>
 struct config {
@@ -57,6 +58,7 @@ struct config {
         semaphore_global semaphore;
         const float Softmax_scale;
         int tic;
+        rope_seqlens_global rope_seqlens;
 #ifdef KITTENS_TIMINGS
         gl<int, 1, -1, -1, 64> timings;
 #endif
@@ -85,6 +87,10 @@ struct partial_layout {
         int start_pos; // first token handled in this partial
         int end_pos; // One past the last position to load
         int length; // the length of the overall sequence in question (not including new tokens)
+        // if speculative prefill is used and some tokens are dropped, length is the physical length
+        // and rope_seqlen is the logical length used for positional embedding
+        // e.g. original sequence [1, 2, 3, 4], sparse sequence [2, 4], length=2, rope_length=4
+        int rope_seqlen;
     };
     struct consumer_state {
         col_vec<rt_fl<16, kcache_tile::rows>> max_vec, norm_vec;
@@ -113,6 +119,8 @@ struct partial_template {
         args.common.end_pos     =  args.instruction[7];
         // valid seqlen of the assigned batch
         args.common.length      =  args.instruction[8];
+        // does this need a more explicit load?
+        args.common.rope_seqlen =  args.globals.rope_seqlens[args.common.q_batch_idx];
         args.num_iters          = cdiv(args.common.end_pos - args.common.start_pos, NUM_ROWS);
         
     }
@@ -163,8 +171,8 @@ struct partial_template {
                 load_async(qrot_st, args.globals.Q, {args.common.q_batch_idx, lookahead_idx, 0, warpgroup::groupid()});
                 load_async(qvo_st, args.globals.QV, {args.common.q_batch_idx, lookahead_idx, 0, warpgroup::groupid()});
                 
-                load(cos_rv, args.globals.cos, {0, 0, args.common.length + args.common.q_seq_idx + warpgroup::warpid(), 0});
-                load(sin_rv, args.globals.sin, {0, 0, args.common.length + args.common.q_seq_idx + warpgroup::warpid(), 0});
+                load(cos_rv, args.globals.cos, {0, 0, args.common.rope_seqlen + args.common.q_seq_idx + warpgroup::warpid(), 0});
+                load(sin_rv, args.globals.sin, {0, 0, args.common.rope_seqlen + args.common.q_seq_idx + warpgroup::warpid(), 0});
 
                 load_async_wait();
                 auto other_qrot_st = subtile_inplace<16, QKRot_D_d2>(args.scratch.qrot, {warpgroup::warpid(), 1 - warpgroup::groupid()});
@@ -637,7 +645,8 @@ PYBIND11_MODULE(mla_decode, m) {
         &config<16>::globals::Lvec_scratch,
         &config<16>::globals::semaphore,
         &config<16>::globals::Softmax_scale,
-        &config<16>::globals::tic
+        &config<16>::globals::tic,
+        &config<16>::globals::rope_seqlens
 #ifdef KITTENS_TIMINGS
         , &config<16>::globals::timings
 #endif
@@ -658,7 +667,8 @@ PYBIND11_MODULE(mla_decode, m) {
         &config<8>::globals::Lvec_scratch,
         &config<8>::globals::semaphore,
         &config<8>::globals::Softmax_scale,
-        &config<8>::globals::tic
+        &config<8>::globals::tic,
+        &config<8>::globals::rope_seqlens
 #ifdef KITTENS_TIMINGS
         , &config<8>::globals::timings
 #endif
