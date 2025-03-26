@@ -293,16 +293,19 @@ struct partial_template {
                     auto eos_page_idx = args.common.length/PAGE_SIZE;
                     auto space_left_in_page = PAGE_SIZE - (args.common.length % PAGE_SIZE);
 
-                    if (num_new_tokens <= space_left_in_page) {
-                        auto eos_page_addr = args.globals.Table[coord<>{args.common.q_batch_idx, eos_page_idx}];
-                        auto row_offset_within_page = args.common.length % PAGE_SIZE;
-                        
-                        // if (threadIdx.x == 0) {
-                        //     printf("Warp %d, Group %d: KV update: seqlen=%d, num_new_tokens=%d, update_page_id=%d, within_page_idx=%d (%d), dst_offset_within_tile=%d\n", warpgroup::warpid(), warpgroup::groupid(), args.common.length, num_new_tokens, update_page_id, within_page_idx, within_page_idx * NUM_ROWS, dst_offset_within_tile);
-                        // }
+                    // will always write at least 1 token to existing page
+                    auto tokens_in_trailing_page = min(num_new_tokens, space_left_in_page);
+                    auto eos_page_addr = args.globals.Table[coord<>{args.common.q_batch_idx, eos_page_idx}];
+                    auto row_offset_within_page = args.common.length % PAGE_SIZE;
+                    kittens::store_masked(args.globals.K_cache, args.input.kcache, {0, eos_page_addr, 0, 0}, row_offset_within_page, 0, tokens_in_trailing_page);
+                    kittens::store_masked(args.globals.V_cache, args.input.vcache, {0, eos_page_addr, 0, 0}, row_offset_within_page, 0, tokens_in_trailing_page);
 
-                        kittens::store_masked(args.globals.K_cache, args.input.kcache, {0, eos_page_addr, 0, 0}, row_offset_within_page, 0, num_new_tokens);
-                        kittens::store_masked(args.globals.V_cache, args.input.vcache, {0, eos_page_addr, 0, 0}, row_offset_within_page, 0, num_new_tokens);
+                    // write remaining tokens to next page
+                    auto tokens_in_next_page = num_new_tokens - tokens_in_trailing_page;
+                    if (tokens_in_next_page > 0) {
+                        auto next_page_addr = args.globals.Table[coord<>{args.common.q_batch_idx, eos_page_idx + 1}];
+                        kittens::store_masked(args.globals.K_cache, args.input.kcache, {0, next_page_addr, 0, 0}, 0, tokens_in_trailing_page, tokens_in_next_page);
+                        kittens::store_masked(args.globals.V_cache, args.input.vcache, {0, next_page_addr, 0, 0}, 0, tokens_in_trailing_page, tokens_in_next_page);
                     }
                 }
                 group<8>::sync(17);

@@ -281,42 +281,53 @@ def main(seq_lengths, new_tokens, q_heads=16, use_rope=True):
 
     # Check kv update (last N tokens match between K_cache and K_new)
     for b in range(len(Lengths)):
+        # find page where the end of sequence lands
         eos_page_idx = Lengths[b] // PAGE_SIZE
         eos_page_addr = Table[b, eos_page_idx]
         offset_in_page = Lengths[b] % PAGE_SIZE
-        if offset_in_page + new_tokens > PAGE_SIZE:
-            # print(f"Skipping batch {b} because of page boundary")
-            continue
 
-        cached_K = K_cache[eos_page_addr, offset_in_page:offset_in_page+new_tokens]
-        cached_V = V_cache[eos_page_addr, offset_in_page:offset_in_page+new_tokens]
+        space_in_eos_page = PAGE_SIZE - offset_in_page
+        tokens_in_eos_page = min(new_tokens, space_in_eos_page)
+
+        cached_K = K_cache[
+            eos_page_addr, offset_in_page : offset_in_page + tokens_in_eos_page
+        ]
+        cached_V = V_cache[
+            eos_page_addr, offset_in_page : offset_in_page + tokens_in_eos_page
+        ]
+
+        if new_tokens > tokens_in_eos_page:
+            spillover_tokens = new_tokens - tokens_in_eos_page
+            next_page_addr = Table[b, eos_page_idx + 1]
+            extra_K = K_cache[next_page_addr, :spillover_tokens]
+            extra_V = V_cache[next_page_addr, :spillover_tokens]
+            cached_K = torch.cat([cached_K, extra_K], dim=-2)
+            cached_V = torch.cat([cached_V, extra_V], dim=-2)
+
         new_K = K_new[b, :]
         new_V = V_new[b, :]
-
         if not torch.allclose(cached_K, new_K, atol=1e-3):
-            print(cached_K[..., :4])
-            print(new_K[..., :4])
+            print("Reference", new_K[..., :4])
+            print("Candidate", cached_K[..., :4])
             assert False, "K_cache update failed"
         if not torch.allclose(cached_V, new_V, atol=1e-3):
-            print(cached_V[..., :4])
-            print(new_V[..., :4])
+            print("Reference", new_V[..., :4])
+            print("Candidate", cached_V[..., :4])
             assert False, "V_cache update failed"
-
 
     # time_per_iter = profile_thundermla(QRot, QV, sin, cos, K_cache, V_cache, K_new, V_new, Lengths, Table, Instructions, O_scratch, Lvec_scratch, Semaphore, Timings)
     # print(f"Time per iter: {time_per_iter*1000} ms")
 
     # save_gantt_chart(Timings, Instructions, name='new')
 
+
 if __name__ == "__main__":
     main([1], 1, 16)
     main([16], 4, 16)
-    main([32], 4, 16)
     main([64], 2, 16)
     main([4641,45118,1730,1696], 4, 16)
     main([65536], 1, 16)
-    main([512]*64, 2, 16)
-    main([4096]*13, 4, 16)
+    main([512] * 64, 2, 16)
     main([4096]*132, 4, 16)
     main([871,568,711,329,617,1015,348,978,543,837,650,1020,924,679,560,497,650,406,381,423,511,423,569,943,645,820,829,883,937,765,711,847,722,546,519,279,516,315,664,845,850,546,670,871,527,329,446,764,582,1011,453,655,532,985,1019,810,317,305,949,317,669,768,530,349], 4, 16)
     

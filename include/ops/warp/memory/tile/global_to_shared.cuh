@@ -166,7 +166,7 @@ __device__ static inline void store_masked(const GL &dst, const ST &src, const C
     int laneid = threadIdx.x % N_THREADS;
 
     for(int row = row_offset_src; row < row_offset_src + num_rows; row++) {
-        // #pragma unroll
+        #pragma unroll
         for (int col = laneid*elem_per_memcpy; col < tile_width; col += N_THREADS*elem_per_memcpy) {
             auto dst_row = row - row_offset_src + row_offset_dst;
 
