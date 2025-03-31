@@ -8,31 +8,31 @@ using namespace kittens;
 using namespace kittens::prototype;
 using namespace kittens::prototype::interpreter;
 
-static constexpr int QKRot_D = 64, QKRot_Dd2 = 64/2, QVO_D = 512, QVO_Dd2 = QVO_D/2, NUM_ROWS = 32, PAGE_SIZE = 256;
+static constexpr int QKRot_D = 64, QKRot_D_d2 = QKRot_D/2, QVO_D = 512, QVO_D_d2 = QVO_D/2, QVO_D_d8 = QVO_D/8, NUM_ROWS = 32, NUM_ROWS_d2 = NUM_ROWS/2, PAGE_SIZE = 256;
 using qrot_tile           = st_bf<64, QKRot_D>;
 using qvo_tile            = st_bf<64, QVO_D>;
 // batch, depth, rows, cols
 // R == lookahead
-using q_global            = kittens::gl<bf16, -1, -1, -1, QKRot_D, qrot_tile>; // B * R * H * D_QKRot_D
-using qv_global           = kittens::gl<bf16, -1, -1, -1, QVO_D, qvo_tile>; // B * R * H * D_QVO_D
-using sin_global          = kittens::gl<bf16, 1, 1, -1, QKRot_Dd2>;
-using cos_global          = kittens::gl<bf16, 1, 1, -1, QKRot_Dd2>;
+using q_global            = kittens::gl<bf16, -1, -1, -1, QKRot_D, qrot_tile>; // B * R * H * QKRot_D
+using qv_global           = kittens::gl<bf16, -1, -1, -1, QVO_D, qvo_tile>; // B * R * H * QVO_D
 using kcache_tile         = st_bf<NUM_ROWS, QKRot_D>;
 using vcache_tile         = st_bf<NUM_ROWS, QVO_D>; // we need the v_tile for later
-using vcache_tile2        = st_bf<NUM_ROWS, QVO_Dd2>; // we need the v_tile for later
+using vcache_tile2        = st_bf<NUM_ROWS, QVO_D_d2>; // we need the v_tile for later
 using kcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QKRot_D, kcache_tile>; // 1 * #page * pagesize * QKRot_D
 using vcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QVO_D, vcache_tile>;   // 1 * #page * pagesize * QVO_D
 using knew_global         = kittens::gl<bf16, 1, -1, -1, QKRot_D, kcache_tile>;        // 1 * B * lookahead * QKRot_D
 using vnew_global         = kittens::gl<bf16, 1, -1, -1, QVO_D, vcache_tile>;          // 1 * B * lookahead * QVO_D
+using sin_global          = kittens::gl<bf16, 1, 1, -1, QKRot_D_d2>;
+using cos_global          = kittens::gl<bf16, 1, 1, -1, QKRot_D_d2>;
 using ops_global          = kittens::gl<bf16, 1, -1, -1, 8>;
 using instructions_global = kittens::gl<int, 1, -1, -1, 32>;
 using table_global        = kittens::gl<int, 1, 1, -1, -1>; // B * (max # pages)
 using o_tile              = st_bf<64, QVO_D>;
 using o_tile_fl           = st_fl<16, QVO_D>;
-using o_global            = kittens::gl<bf16, -1, -1, -1, QVO_D, st_bf<16, QVO_Dd2>, st_bf<16, QVO_D/8>>; // B * NEWTOKENS * H * D_VO
+using o_global            = kittens::gl<bf16, -1, -1, -1, QVO_D, st_bf<16, QVO_D_d2>, st_bf<16, QVO_D_d8>>; // B * NEWTOKENS * H * D_VO
 
 template<int Q_HEADS=16>
-using o_scratch_global    = kittens::gl<float, -1, -1, Q_HEADS, QVO_D, st_fl<16, QVO_D/8>, st_fl<16,256>>; // For partial O's
+using o_scratch_global    = kittens::gl<float, -1, -1, Q_HEADS, QVO_D, st_fl<16, QVO_D_d8>, st_fl<16,QVO_D_d2>>; // For partial O's
 
 template<int Q_HEADS=16>
 using lvec_scratch_global = kittens::gl<float,  1, -1, -1, Q_HEADS, sv_fl<16>>; // For partial O's
@@ -77,7 +77,7 @@ struct partial_layout {
     struct input_block { kcache_tile kcache; vcache_tile vcache; };
     struct scratch_block { qrot_tile qrot; qvo_tile qvo; st_bf<64, kcache_tile::rows> att_block; sv_fl<64> max_vec, norm_vec; };
     // always one token per QVO block; if Q_HEADS < 16, then we need to pad
-    struct finish_block { st_fl<16, QVO_Dd2> o[4][2]; sv_fl<16> lvec[4]; };
+    struct finish_block { st_fl<16, QVO_D_d2> o[4][2]; sv_fl<16> lvec[4]; };
     struct common_state {
         int uid;
         location dst;
@@ -89,7 +89,7 @@ struct partial_layout {
     };
     struct consumer_state {
         col_vec<rt_fl<16, kcache_tile::rows>> max_vec, norm_vec;
-        rt_fl<16, QVO_Dd2> o;
+        rt_fl<16, QVO_D_d2> o;
     };
 };
 template<int Q_HEADS=16>
@@ -144,8 +144,8 @@ struct partial_template {
 #endif
             // split up Q tile across warps (tokens) and dim (groups) (total 8 ways)
             // each warp loads one token's worth of QRot and QV
-            auto qrot_st = subtile_inplace<16, QKRot_D/2>(args.scratch.qrot, {warpgroup::warpid(), warpgroup::groupid()});
-            auto qvo_st = subtile_inplace<16, QVO_Dd2>(args.scratch.qvo, {warpgroup::warpid(), warpgroup::groupid()});
+            auto qrot_st = subtile_inplace<16, QKRot_D_d2>(args.scratch.qrot, {warpgroup::warpid(), warpgroup::groupid()});
+            auto qvo_st = subtile_inplace<16, QVO_D_d2>(args.scratch.qvo, {warpgroup::warpid(), warpgroup::groupid()});
             auto lookahead_idx = args.common.q_seq_idx + warpgroup::warpid();
 
             // init local state
@@ -155,10 +155,10 @@ struct partial_template {
             zero(args.state.o);
 
             // Setup RoPE buffers
-            row_vec<rt_bf<16, QKRot_Dd2>> cos_rv;
-            row_vec<rt_bf<16, QKRot_Dd2>> sin_rv;
-            rt_bf<16, QKRot_Dd2> temp_sin_rt;
-            rt_bf<16, QKRot_Dd2> temp_cos_rt;
+            row_vec<rt_bf<16, QKRot_D_d2>> cos_rv;
+            row_vec<rt_bf<16, QKRot_D_d2>> sin_rv;
+            rt_bf<16, QKRot_D_d2> temp_sin_rt;
+            rt_bf<16, QKRot_D_d2> temp_cos_rt;
 
             if (lookahead_idx < args.globals.K_new.rows()) {
                 load_async(qrot_st, args.globals.Q, {args.common.q_batch_idx, lookahead_idx, 0, warpgroup::groupid()});
@@ -168,7 +168,7 @@ struct partial_template {
                 load(sin_rv, args.globals.sin, {0, 0, args.common.length + args.common.q_seq_idx + warpgroup::warpid(), 0});
 
                 load_async_wait();
-                auto other_qrot_st = subtile_inplace<16, QKRot_Dd2>(args.scratch.qrot, {warpgroup::warpid(), 1 - warpgroup::groupid()});
+                auto other_qrot_st = subtile_inplace<16, QKRot_D_d2>(args.scratch.qrot, {warpgroup::warpid(), 1 - warpgroup::groupid()});
                 load(temp_cos_rt, qrot_st);
                 load(temp_sin_rt, other_qrot_st);
     
@@ -272,21 +272,51 @@ struct partial_template {
             if (args.iter >= args.num_iters-1 && args.common.end_pos == args.common.length) {
                 // Q = [NEW_TOKENS * Q_HEADS, D] (we already have this from setup)
                 
-                if (warpgroup::groupid() == 0) {
+                if (warpgroup::groupid() == 0 && warpgroup::warpid() == 0) {
                     // K = [NEW_TOKENS, D] (new KV tokens, load GMEM -> SMEM)
                     // slice [NUM_ROWS, D] from [1, B, R, D]
                     // always load tile at [0, 0], since tile shape works out: NUM_ROWS >= R and NUM_COLS == D
                     load_async(args.input.kcache, args.globals.K_new, {0, args.common.q_batch_idx, 0, 0});
                     load_async(args.input.vcache, args.globals.V_new, {0, args.common.q_batch_idx, 0, 0});
                     load_async_wait();
+
+                    auto kcache_st_0 = subtile_inplace<NUM_ROWS_d2, QKRot_D_d2>(args.input.kcache, {0, 0});
+                    auto kcache_st_1 = subtile_inplace<NUM_ROWS_d2, QKRot_D_d2>(args.input.kcache, {0, 1});
+
+                    rt_bf<NUM_ROWS_d2, QKRot_D_d2> k_rt_0;
+                    rt_bf<NUM_ROWS_d2, QKRot_D_d2> k_rt_1;
+                    rt_bf<NUM_ROWS_d2, QKRot_D_d2> cos_rt;
+                    rt_bf<NUM_ROWS_d2, QKRot_D_d2> sin_rt;
+                    rt_bf<NUM_ROWS_d2, QKRot_D_d2> k_rt_0_sin;
+                    rt_bf<NUM_ROWS_d2, QKRot_D_d2> k_rt_0_cos;
+                    rt_bf<NUM_ROWS_d2, QKRot_D_d2> k_rt_1_sin;
+                    rt_bf<NUM_ROWS_d2, QKRot_D_d2> k_rt_1_cos;
+
+                    load(k_rt_0, kcache_st_0);
+                    load(k_rt_1, kcache_st_1);
+                    load(cos_rt, args.globals.cos, coord<>{0, 0, args.common.length + args.common.q_seq_idx, 0});
+                    load(sin_rt, args.globals.sin, coord<>{0, 0, args.common.length + args.common.q_seq_idx, 0});
+
+                    mul(k_rt_0_cos, k_rt_0, cos_rt); // k_rt_0_cos = k_rt_0 * cos
+                    mul(k_rt_0_sin, k_rt_0, sin_rt); // k_rt_0_sin = k_rt_0 * sin
+                    mul(k_rt_1_cos, k_rt_1, cos_rt); // k_rt_1_cos = k_rt_1 * cos
+                    mul(k_rt_1_sin, k_rt_1, sin_rt); // k_rt_1_sin = k_rt_1 * sin
+
+                    // (k_rt_0, k_rt_1) -> (k_rt_0 * cos - k_rt_1 * sin, k_rt_0 * sin + k_rt_1 * cos)
+                    sub(k_rt_0, k_rt_0_cos, k_rt_1_sin); // k_rt_0 = k_rt_0_cos - k_rt_1_sin = k_rt_0 * cos - k_rt_1 * sin
+                    add(k_rt_1, k_rt_1_cos, k_rt_0_sin); // k_rt_1 = k_rt_1_cos + k_rt_0_sin = k_rt_1 * cos + k_rt_0 * sin
+
+                    store(kcache_st_0, k_rt_0);
+                    store(kcache_st_1, k_rt_1);
                 }
+                group<8>::sync(17);
 
                 // QK -> [NEW_TOKENS * Q_HEADS, NEW_TOKENS]
                 // V = [NEW_TOKENS, D]
                 // QK @ V -> [NEW_TOKENS * Q_HEADS, D]
                 internal_compute<false, true>(args);
 
-                if (warpgroup::groupid() == 0 and warpgroup::warpid() == 0) {
+                if(warpgroup::groupid() == 0 && warpgroup::warpid() == 0) {
                     // write out KV update
 
                     auto num_new_tokens = args.globals.K_new.rows();
@@ -330,7 +360,7 @@ struct partial_template {
             div_row(args.state.o, args.state.o, local_norm_vec);
 
             if(args.common.dst.batch_idx >= 0) { // batch is meaningful
-                auto &o_smem = reinterpret_cast<st_bf<16, QVO_Dd2>&>(args.finish.o[warpgroup::warpid()][warpgroup::groupid()]);
+                auto &o_smem = reinterpret_cast<st_bf<16, QVO_D_d2>&>(args.finish.o[warpgroup::warpid()][warpgroup::groupid()]);
                 store(o_smem, args.state.o);
                 __syncwarp();
                 tma::store_async<dim::ROW, cache_policy::EVICT_FIRST>(args.globals.O, o_smem, {args.common.dst.batch_idx, args.common.dst.seq_idx+warpgroup::warpid(), 0, warpgroup::groupid()});
@@ -374,8 +404,8 @@ struct partial_template {
 template<int Q_HEADS=16>
 struct reduction_layout {
     using globals = config<Q_HEADS>::globals;
-    struct input_block   { st_fl<16, QVO_D/8> o[8]; sv_fl<16> lvec; sv_fl<16> padding[15]; };
-    struct scratch_block { st_fl<16, QVO_D/8> o[8]; sv_fl<16> lvec; semaphore producer_block; }; // used both for setup load and finish store
+    struct input_block   { st_fl<16, QVO_D_d8> o[8]; sv_fl<16> lvec; sv_fl<16> padding[15]; };
+    struct scratch_block { st_fl<16, QVO_D_d8> o[8]; sv_fl<16> lvec; semaphore producer_block; }; // used both for setup load and finish store
     struct common_state {
         int uid;
         // int num_iters; // same as the number of active load_uid's, marked here for instruction clarity but we just use args.num_iters instead.
@@ -383,7 +413,7 @@ struct reduction_layout {
         int src_uid;
     };
     struct consumer_state {
-        rt_fl<16, QVO_D/8> o;
+        rt_fl<16, QVO_D_d8> o;
         col_vec<rt_fl<16, kcache_tile::rows>> lvec;
     };
 };
@@ -457,7 +487,7 @@ struct reduction_template {
             if(group<8>::laneid() == 0 && args.iter < 24) args.timings[8+args.iter] = clock64();
 #endif
             col_vec<rt_fl<16, kcache_tile::rows>> lvec, max_lvec, sum_lvec;
-            rt_fl<16, QVO_D / 8> o;
+            rt_fl<16, QVO_D_d8> o;
             load(o, args.input.o[group<8>::warpid()]);
             load(lvec, args.input.lvec);
             __syncwarp();
@@ -481,7 +511,7 @@ struct reduction_template {
             if(group<8>::laneid() == 0) args.timings[62] = clock64();
 #endif
             if(args.common.dst.batch_idx >= 0) {
-                auto &o_smem = reinterpret_cast<st_bf<16, QVO_D/8>&>(args.scratch.o[group<8>::warpid()]);
+                auto &o_smem = reinterpret_cast<st_bf<16, QVO_D_d8>&>(args.scratch.o[group<8>::warpid()]);
                 store(o_smem, args.state.o);
                 __syncwarp();
                 tma::store_async<dim::ROW, cache_policy::EVICT_FIRST>(args.globals.O, o_smem, {args.common.dst.batch_idx, args.common.dst.seq_idx, 0, group<8>::warpid()});
@@ -511,7 +541,6 @@ struct reduction_template {
 
 #include <vector>
 #include <queue>
-#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <pybind11/pybind11.h>
