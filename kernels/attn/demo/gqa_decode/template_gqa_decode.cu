@@ -18,8 +18,7 @@ using kcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QKVO_D, kcache_t
 using vcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QKVO_D, vcache_tile>; // 1 * #page * pagesize * QKVO_D
 using knew_global         = kittens::gl<bf16, 1, -1, -1, QKVO_D, kcache_tile>;        // 1 * B * lookahead * QKVO_D
 using vnew_global         = kittens::gl<bf16, 1, -1, -1, QKVO_D, vcache_tile>;          // 1 * B * lookahead * QKVO_D
-using sin_global          = kittens::gl<bf16, 1, 1, -1, QKVO_D_d2>;
-using cos_global          = kittens::gl<bf16, 1, 1, -1, QKVO_D_d2>;
+using rotary_global       = kittens::gl<bf16, 1, 1, -1, QKVO_D_d2>;
 using ops_global          = kittens::gl<bf16, 1, -1, -1, 8>;
 using instructions_global = kittens::gl<int, 1, -1, -1, 32>;
 using table_global        = kittens::gl<int, 1, 1, -1, -1>; // B * (max # pages)
@@ -44,8 +43,8 @@ struct config {
         vcache_global V_cache;
         knew_global K_new;
         vnew_global V_new;
-        sin_global sin;
-        cos_global cos;
+        rotary_global sin;
+        rotary_global cos;
         table_global Table;
         o_global O;
         o_scratch_global<Q_HEADS> O_scratch;

@@ -22,8 +22,7 @@ using kcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QKRot_D, kcache_
 using vcache_global       = kittens::gl<bf16, 1, -1, PAGE_SIZE, QVO_D, vcache_tile>;   // 1 * #page * pagesize * QVO_D
 using knew_global         = kittens::gl<bf16, 1, -1, -1, QKRot_D, kcache_tile>;        // 1 * B * lookahead * QKRot_D
 using vnew_global         = kittens::gl<bf16, 1, -1, -1, QVO_D, vcache_tile>;          // 1 * B * lookahead * QVO_D
-using sin_global          = kittens::gl<bf16, 1, 1, -1, QKRot_D_d2>;
-using cos_global          = kittens::gl<bf16, 1, 1, -1, QKRot_D_d2>;
+using rotary_global       = kittens::gl<bf16, 1, 1, -1, QKRot_D_d2>;
 using ops_global          = kittens::gl<bf16, 1, -1, -1, 8>;
 using instructions_global = kittens::gl<int, 1, -1, -1, 32>;
 using table_global        = kittens::gl<int, 1, 1, -1, -1>; // B * (max # pages)
@@ -45,12 +44,12 @@ struct config {
         instructions_global instructions;
         q_global Q;
         qv_global QV;
-        sin_global sin;
-        cos_global cos;
         kcache_global K_cache;
         vcache_global V_cache;
         knew_global K_new;
         vnew_global V_new;
+        rotary_global sin;
+        rotary_global cos;
         table_global Table;
         o_global O;
         o_scratch_global<Q_HEADS> O_scratch;
@@ -626,12 +625,12 @@ PYBIND11_MODULE(mla_decode, m) {
         &config<16>::globals::instructions,
         &config<16>::globals::Q,
         &config<16>::globals::QV,
-        &config<16>::globals::sin,
-        &config<16>::globals::cos,
         &config<16>::globals::K_cache,
         &config<16>::globals::V_cache,
         &config<16>::globals::K_new,
         &config<16>::globals::V_new,
+        &config<16>::globals::sin,
+        &config<16>::globals::cos,
         &config<16>::globals::Table,
         &config<16>::globals::O,
         &config<16>::globals::O_scratch,
@@ -647,12 +646,12 @@ PYBIND11_MODULE(mla_decode, m) {
         &config<8>::globals::instructions,
         &config<8>::globals::Q,
         &config<8>::globals::QV,
-        &config<8>::globals::sin,
-        &config<8>::globals::cos,
         &config<8>::globals::K_cache,
         &config<8>::globals::V_cache,
         &config<8>::globals::K_new,
         &config<8>::globals::V_new,
+        &config<8>::globals::sin,
+        &config<8>::globals::cos,
         &config<8>::globals::Table,
         &config<8>::globals::O,
         &config<8>::globals::O_scratch,

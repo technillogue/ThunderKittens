@@ -56,7 +56,7 @@ def create_thundergqa_arguments(seq_lengths, new_tokens, q_heads=8):
         min_idx = processor_assignments.index(max(processor_assignments))
         processor_assignments[min_idx] += 1
 
-    new_tokens_for_estimate = new_tokens // 2 # TODO: check
+    new_tokens_for_estimate = new_tokens // 2  # TODO: check
     processor_assignments = sorted(
         [
             (estimate_schedule_length(p, new_tokens_for_estimate, s), p, s, i)
@@ -115,7 +115,8 @@ def create_thundergqa_arguments(seq_lengths, new_tokens, q_heads=8):
 
 
 def create_rope_embeddings(seq_lengths, new_tokens, rope_dim, base: float = 10000.0):
-    NUM_ROWS_d2 = 16  # add NUM_ROWS_d2 to account for loading in 16 rows to not overflow
+    # add NUM_ROWS_d2 to account for loading in 16 rows to not overflow
+    NUM_ROWS_d2 = 16
     seq_len = max(seq_lengths) + new_tokens + NUM_ROWS_d2
 
     half_dim = rope_dim // 2
@@ -239,12 +240,12 @@ def run_thundergqa(
 
 def profile_thundergqa(
     Q,
-    sin,
-    cos,
     K_cache,
     V_cache,
     K_new,
     V_new,
+    sin,
+    cos,
     Table,
     Instructions,
     O_scratch,
@@ -479,11 +480,6 @@ def main(seq_lengths, new_tokens, q_heads=8):
             print("Candidate", cached_V[..., :4])
             assert False, "V_cache update failed"
 
-    # time_per_iter = profile_thundermla(
-    #     QRot,
-    #     QV,
-
-
     # time_per_iter = profile_thundergqa(
     #     Q,
     #     K_cache,
@@ -499,91 +495,15 @@ def main(seq_lengths, new_tokens, q_heads=8):
     #     Semaphore,
     #     Timings,
     # )
-    # print(f"Time per iter: {time_per_iter*1000} ms")
+    # print(f"Time per iter: {time_per_iter * 1000} ms")
 
-    # save_gantt_chart(Timings, Instructions, name='new')
+    # save_gantt_chart(Timings, Instructions, name="new")
 
 
 if __name__ == "__main__":
     main([1], 1, 8)
-    main([16], 1, 8)
     main([16], 4, 8)
     main([64], 2, 8)
-    main([4641, 45118, 1730, 1696], 4, 8)
-    main([65536], 1, 8)
-    main([512] * 64, 2, 8)
-    main([4096] * 132, 4, 8)
-    main(
-        [
-            871,
-            568,
-            711,
-            329,
-            617,
-            1015,
-            348,
-            978,
-            543,
-            837,
-            650,
-            1020,
-            924,
-            679,
-            560,
-            497,
-            650,
-            406,
-            381,
-            423,
-            511,
-            423,
-            569,
-            943,
-            645,
-            820,
-            829,
-            883,
-            937,
-            765,
-            711,
-            847,
-            722,
-            546,
-            519,
-            279,
-            516,
-            315,
-            664,
-            845,
-            850,
-            546,
-            670,
-            871,
-            527,
-            329,
-            446,
-            764,
-            582,
-            1011,
-            453,
-            655,
-            532,
-            985,
-            1019,
-            810,
-            317,
-            305,
-            949,
-            317,
-            669,
-            768,
-            530,
-            349,
-        ],
-        4,
-        8,
-    )
-
     main([4641, 45118, 1730, 1696], 4, 8)
     main([65536], 1, 8)
     main([512] * 64, 2, 8)
