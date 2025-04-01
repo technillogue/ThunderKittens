@@ -123,7 +123,7 @@ def create_thundermla_arguments(seq_lengths, new_tokens, q_heads=16):
     return Instructions, O_scratch, Lvec_scratch, Semaphore, Timings
 
 
-def create_rope_embeddings(seq_lengths, new_tokens, rope_dim=64, base: float = 10000.0):
+def create_rope_embeddings(seq_lengths, new_tokens, rope_dim, base: float = 10000.0):
     # add NUM_ROWS_d2 to account for loading in 16 rows to not overflow
     NUM_ROWS_d2 = 16
     seq_len = max(seq_lengths) + new_tokens + NUM_ROWS_d2
@@ -185,12 +185,12 @@ def apply_rope(X, Lengths, sin, cos):
 def run_thundermla(
     QRot,
     QV,
-    sin,
-    cos,
     K_cache,
     V_cache,
     K_new,
     V_new,
+    sin,
+    cos,
     Table,
     Instructions,
     O_scratch,
@@ -416,7 +416,7 @@ def main(seq_lengths, new_tokens, q_heads=16):
         seq_lengths, new_tokens, q_heads
     )
 
-    sin, cos = create_rope_embeddings(Lengths, new_tokens)
+    sin, cos = create_rope_embeddings(Lengths, new_tokens, rope_dim=D_Rot)
 
     ref, K_new_rope_applied = run_mla_torch(
         QRot, QV, K_cache, V_cache, K_new, V_new, sin, cos, Lengths, Table
@@ -504,23 +504,23 @@ def main(seq_lengths, new_tokens, q_heads=16):
             print("Candidate", cached_V[..., :4])
             assert False, "V_cache update failed"
 
-    time_per_iter = profile_thundermla(
-        QRot,
-        QV,
-        K_cache,
-        V_cache,
-        K_new,
-        V_new,
-        sin,
-        cos,
-        Table,
-        Instructions,
-        O_scratch,
-        Lvec_scratch,
-        Semaphore,
-        Timings,
-    )
-    print(f"Time per iter: {time_per_iter * 1000} ms")
+    # time_per_iter = profile_thundermla(
+    #     QRot,
+    #     QV,
+    #     K_cache,
+    #     V_cache,
+    #     K_new,
+    #     V_new,
+    #     sin,
+    #     cos,
+    #     Table,
+    #     Instructions,
+    #     O_scratch,
+    #     Lvec_scratch,
+    #     Semaphore,
+    #     Timings,
+    # )
+    # print(f"Time per iter: {time_per_iter * 1000} ms")
 
     # save_gantt_chart(Timings, Instructions, name="new")
 
