@@ -121,16 +121,16 @@ def create_rope_embeddings(seq_lengths, new_tokens, rope_dim, base: float = 1000
 
     half_dim = rope_dim // 2
 
-    positions = torch.arange(seq_len, dtype=torch.bfloat16).unsqueeze(1)  # [seq_len, 1]
-    dim_indices = torch.arange(half_dim, dtype=torch.bfloat16).unsqueeze(
+    positions = torch.arange(seq_len, dtype=torch.float32).unsqueeze(1)  # [seq_len, 1]
+    dim_indices = torch.arange(half_dim, dtype=torch.float32).unsqueeze(
         0
     )  # [1, half_dim]
 
     freq = 1.0 / (base ** (2 * dim_indices / rope_dim))  # [1, half_dim]
     angles = positions * freq  # [seq_len, half_dim]
 
-    sin = torch.sin(angles).to(torch.device("cuda"))  # [seq_len, half_dim]
-    cos = torch.cos(angles).to(torch.device("cuda"))  # [seq_len, half_dim]
+    sin = torch.sin(angles).to(torch.device("cuda"), dtype=torch.bfloat16)  # [seq_len, half_dim]
+    cos = torch.cos(angles).to(torch.device("cuda"), dtype=torch.bfloat16)  # [seq_len, half_dim]
 
     return sin, cos
 
