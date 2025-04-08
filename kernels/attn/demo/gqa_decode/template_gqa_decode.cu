@@ -43,8 +43,8 @@ struct config {
         vcache_global V_cache;
         knew_global K_new;
         vnew_global V_new;
-        rotary_global sin;
         rotary_global cos;
+        rotary_global sin;
         table_global Table;
         o_global O;
         o_scratch_global<Q_HEADS> O_scratch;
@@ -620,8 +620,8 @@ PYBIND11_MODULE(gqa_decode, m) {
         &config<8>::globals::V_cache,
         &config<8>::globals::K_new,
         &config<8>::globals::V_new,
-        &config<8>::globals::sin,
         &config<8>::globals::cos,
+        &config<8>::globals::sin,
         &config<8>::globals::Table,
         &config<8>::globals::O,
         &config<8>::globals::O_scratch,

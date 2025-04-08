@@ -10,6 +10,7 @@ from scheduler_regression import estimate_schedule_length
 from scheduler_v2 import backward_schedule
 from timings import save_gantt_chart
 from tqdm import tqdm
+from flash_attn.layers.rotary import apply_rotary_emb_torch, RotaryEmbedding
 
 D = 128
 PAGE_SIZE = 256
@@ -114,63 +115,41 @@ def create_thundergqa_arguments(seq_lengths, new_tokens, q_heads=8):
     return Instructions, O_scratch, Lvec_scratch, Semaphore, Timings
 
 
+# https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/layers/rotary.py
 def create_rope_embeddings(seq_lengths, new_tokens, rope_dim, base: float = 10000.0):
     # add NUM_ROWS_d2 to account for loading in 16 rows to not overflow
     NUM_ROWS_d2 = 16
     seq_len = max(seq_lengths) + new_tokens + NUM_ROWS_d2
 
-    half_dim = rope_dim // 2
+    t = torch.arange(seq_len, device=torch.device("cuda"), dtype=torch.float32)
+    inv_freq = 1.0 / (
+        base
+        ** (torch.arange(0, rope_dim, 2, device=torch.device("cuda"), dtype=torch.float32) / rope_dim)
+    )
 
-    positions = torch.arange(seq_len, dtype=torch.float32).unsqueeze(1)  # [seq_len, 1]
-    dim_indices = torch.arange(half_dim, dtype=torch.float32).unsqueeze(
-        0
-    )  # [1, half_dim]
+    freqs = torch.outer(t, inv_freq)
 
-    freq = 1.0 / (base ** (2 * dim_indices / rope_dim))  # [1, half_dim]
-    angles = positions * freq  # [seq_len, half_dim]
-
-    sin = torch.sin(angles).to(torch.device("cuda"), dtype=torch.bfloat16)  # [seq_len, half_dim]
-    cos = torch.cos(angles).to(torch.device("cuda"), dtype=torch.bfloat16)  # [seq_len, half_dim]
-
-    return sin, cos
+    cos = torch.cos(freqs).to(torch.bfloat16)
+    sin = torch.sin(freqs).to(torch.bfloat16)
+    
+    return cos, sin
 
 
-def apply_rope(X, Lengths, sin, cos):
+def apply_rope(X, Lengths, cos, sin):
     assert X.ndim == 3 or X.ndim == 4
 
     X_rope = X.clone()
-    is_query = X_rope.ndim == 3
+    is_k = X_rope.ndim == 3
 
-    if is_query:
-        _, new_tokens, rope_dim = X_rope.shape
-    else:
-        _, new_tokens, _, rope_dim = X_rope.shape
+    if is_k:
+        X_rope = X_rope.unsqueeze(2)
 
-    half_dim = rope_dim // 2
+    _, new_tokens, _, rope_dim = X_rope.shape
 
-    def rotate(x, length):
-        # Get positions for the new tokens - they should be the next positions after length
-        new_positions = torch.arange(length, length + new_tokens)
-        if is_query:
-            new_tok_sin = sin[new_positions]  # [new_tokens, half_dim]
-            new_tok_cos = cos[new_positions]  # [new_tokens, half_dim]
-        else:
-            new_tok_sin = sin[new_positions].unsqueeze(1)  # [new_tokens, 1, half_dim]
-            new_tok_cos = cos[new_positions].unsqueeze(1)  # [new_tokens, 1, half_dim]
+    for i in range(len(Lengths)):
+        X_rope[i] = apply_rotary_emb_torch(X_rope[i], cos[..., Lengths[i]:Lengths[i]+new_tokens, :], sin[..., Lengths[i]:Lengths[i]+new_tokens, :], interleaved=False)
 
-        x1, x2 = x[..., :half_dim], x[..., half_dim:]
-
-        x_rot1 = x1 * new_tok_cos - x2 * new_tok_sin
-        x_rot2 = x1 * new_tok_sin + x2 * new_tok_cos
-
-        return torch.cat([x_rot1, x_rot2], dim=-1)
-
-    # Could just do this at once as a batch operation, but good enough for now
-    for batch_idx in range(len(Lengths)):
-        seq_length = Lengths[batch_idx]
-        X_rope[batch_idx] = rotate(X_rope[batch_idx], seq_length)
-
-    return X_rope
+    return X_rope.squeeze(2) if is_k else X_rope
 
 
 def run_thundergqa(
@@ -306,15 +285,15 @@ def profile_thundergqa(
     return (t1 - t0) / ITERS
 
 
-def run_gqa_torch(Q, K_cache, V_cache, K_new, V_new, sin, cos, Lengths, Table):
+def run_gqa_torch(Q, K_cache, V_cache, K_new, V_new, cos, sin, Lengths, Table):
     q_heads = Q.shape[2]
     new_tokens = K_new.shape[1]
 
     # RoPE for Q
-    Q = apply_rope(Q, Lengths, sin, cos)
+    Q = apply_rope(Q, Lengths, cos, sin)
 
     # RoPE for K
-    K_new_rope_applied = apply_rope(K_new, Lengths, sin, cos)
+    K_new_rope_applied = apply_rope(K_new, Lengths, cos, sin)
 
     softmax_scale = 1.0 / math.sqrt(D)
     O = torch.zeros_like(Q)
@@ -393,10 +372,10 @@ def main(seq_lengths, new_tokens, q_heads=8):
         seq_lengths, new_tokens, q_heads
     )
 
-    sin, cos = create_rope_embeddings(Lengths, new_tokens, rope_dim=D)
+    cos, sin = create_rope_embeddings(Lengths, new_tokens, rope_dim=D)
 
     ref, K_new_rope_applied = run_gqa_torch(
-        Q, K_cache, V_cache, K_new, V_new, sin, cos, Lengths, Table
+        Q, K_cache, V_cache, K_new, V_new, cos, sin, Lengths, Table
     )
     Instructions, O_scratch, Lvec_scratch, Semaphore, Timings = (
         create_thundergqa_arguments(seq_lengths, new_tokens, q_heads)
@@ -407,8 +386,8 @@ def main(seq_lengths, new_tokens, q_heads=8):
         V_cache,
         K_new,
         V_new,
-        sin,
         cos,
+        sin,
         Table,
         Instructions,
         O_scratch,
