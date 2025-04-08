@@ -5,12 +5,12 @@ from typing import List
 import gqa_decode
 import numpy as np
 import torch
+from flash_attn.layers.rotary import apply_rotary_emb_torch
 from scheduler import create_arguments_from_task_schedule, visualize_schedule
 from scheduler_regression import estimate_schedule_length
 from scheduler_v2 import backward_schedule
 from timings import save_gantt_chart
 from tqdm import tqdm
-from flash_attn.layers.rotary import apply_rotary_emb_torch, RotaryEmbedding
 
 D = 128
 PAGE_SIZE = 256
@@ -124,14 +124,19 @@ def create_rope_embeddings(seq_lengths, new_tokens, rope_dim, base: float = 1000
     t = torch.arange(seq_len, device=torch.device("cuda"), dtype=torch.float32)
     inv_freq = 1.0 / (
         base
-        ** (torch.arange(0, rope_dim, 2, device=torch.device("cuda"), dtype=torch.float32) / rope_dim)
+        ** (
+            torch.arange(
+                0, rope_dim, 2, device=torch.device("cuda"), dtype=torch.float32
+            )
+            / rope_dim
+        )
     )
 
     freqs = torch.outer(t, inv_freq)
 
     cos = torch.cos(freqs).to(torch.bfloat16)
     sin = torch.sin(freqs).to(torch.bfloat16)
-    
+
     return cos, sin
 
 
@@ -147,7 +152,12 @@ def apply_rope(X, Lengths, cos, sin):
     _, new_tokens, _, rope_dim = X_rope.shape
 
     for i in range(len(Lengths)):
-        X_rope[i] = apply_rotary_emb_torch(X_rope[i], cos[..., Lengths[i]:Lengths[i]+new_tokens, :], sin[..., Lengths[i]:Lengths[i]+new_tokens, :], interleaved=False)
+        X_rope[i] = apply_rotary_emb_torch(
+            X_rope[i],
+            cos[..., Lengths[i] : Lengths[i] + new_tokens, :],
+            sin[..., Lengths[i] : Lengths[i] + new_tokens, :],
+            interleaved=False,
+        )
 
     return X_rope.squeeze(2) if is_k else X_rope
 
