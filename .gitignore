@@ -7,5 +7,6 @@
 *.txt
 *.d
 *.ncu-rep
+*.so
 __pycache__/
 */printouts/*
