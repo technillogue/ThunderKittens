@@ -81,9 +81,18 @@ def create_thunder_arguments(seq_lengths, new_tokens, q_heads=8):
             processor_assignments = sorted(processor_assignments)
         else:
             break
-    num_processors = [None for _ in seq_lengths]
+    num_processors = [0 for _ in seq_lengths]
     for _, p, s, i in processor_assignments:
         num_processors[i] = max(min(p, s // 128), 1)
+        # could mess up the processor count
+
+    while sum(num_processors) > NUM_PROCESSORS:
+        idx = np.argmax(num_processors)
+        if num_processors[idx] <= 1:
+            raise ValueError("Cannot reduce processor count further without going below minimum")
+        num_processors[idx] -= 1
+
+
     # Create schedule
     start_processors = [sum(num_processors[:i]) for i in range(len(num_processors))]
     scheduled_tasks = []
@@ -509,7 +518,8 @@ def get_random_seq_lengths(B):
 
 
 if __name__ == "__main__":
-    seq_lens = [get_random_seq_lengths(batch_size) for batch_size in torch.randint(1, NUM_PROCESSORS, (100,))]
+    # seq_lens = [[64] * 115 + [300] * 10]
+    seq_lens = [get_random_seq_lengths(batch_size) for batch_size in torch.randint(1, NUM_PROCESSORS, (1000,))]
     # seq_lens = [[1], [16], [64], [4641, 45118, 1730, 1696], [8190] * 2, [8191] * 3, [8192] * 5, [8193] * 7, [65536], [65537] * 2, [65539] * 3, [512] * 64, [4096] * 132, [871, 568, 711, 329, 617, 1015, 348, 978, 543, 837, 650, 1020, 924, 679, 560, 497, 650, 406, 381, 423, 511, 423, 569, 943, 645, 820, 829, 883, 937, 765, 711, 847, 722, 546, 519, 279, 516, 315, 664, 845, 850, 546, 670, 871, 527, 329, 446, 764, 582, 1011, 453, 655, 532, 985, 1019, 810, 317, 305, 949, 317, 669, 768, 530, 349]]
     num_new_tokens = [1, 2, 4]
     q_heads = [8]
