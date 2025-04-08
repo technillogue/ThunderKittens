@@ -2,7 +2,7 @@ import math
 import time
 from typing import List
 
-import gqa_decode
+import chunked_decode
 import numpy as np
 import torch
 from flash_attn.layers.rotary import apply_rotary_emb_torch
@@ -16,7 +16,8 @@ D = 128
 PAGE_SIZE = 256
 NUM_PAGES = 10000  # number of pages in cache
 NUM_PROCESSORS = 132  # number of processors
-seed = torch.randint(1000000, (1,)).item()
+# seed = torch.randint(1000000, (1,)).item()
+seed = 42
 
 ENABLE_TIMINGS = True
 
@@ -47,7 +48,7 @@ def init_arguments(seq_lengths: List[int], new_tokens: int, q_heads: int = 8):
     return Q, K_cache, V_cache, Lengths, Table, K_new, V_new
 
 
-def create_thundergqa_arguments(seq_lengths, new_tokens, q_heads=8):
+def create_thunder_arguments(seq_lengths, new_tokens, q_heads=8):
     # Processor assignment heuristic: assign processors proportionally to sequence lengths.
     t0 = time.time()
     processor_assignments = [
@@ -162,7 +163,7 @@ def apply_rope(X, Lengths, cos, sin):
     return X_rope.squeeze(2) if is_k else X_rope
 
 
-def run_thundergqa(
+def run_thunder(
     Q,
     K_cache,
     V_cache,
@@ -186,8 +187,8 @@ def run_thundergqa(
     softmax_scale = 1.0 / math.sqrt(D)
     torch.cuda.synchronize()
     assert q_heads == 8
-    gqa_decode_fn = gqa_decode.gqa_decode_8_heads
-    gqa_decode_fn(
+    chunked_decode_fn = chunked_decode.chunked_decode_8_heads_8192_chunk
+    chunked_decode_fn(
         Instructions,
         Q,
         K_cache,
@@ -205,7 +206,7 @@ def run_thundergqa(
         tic,
         Timings,
     )
-    gqa_decode_fn(
+    chunked_decode_fn(
         Instructions,
         Q,
         K_cache,
@@ -227,7 +228,7 @@ def run_thundergqa(
     return O, Timings
 
 
-def profile_thundergqa(
+def profile_thunder(
     Q,
     K_cache,
     V_cache,
@@ -249,8 +250,8 @@ def profile_thundergqa(
     softmax_scale = 1.0 / math.sqrt(D)
     # execute once to warm up
     assert q_heads == 8
-    gqa_decode_fn = gqa_decode.gqa_decode_8_heads
-    gqa_decode_fn(
+    chunked_decode_fn = chunked_decode.chunked_decode_8_heads_8192_chunk
+    chunked_decode_fn(
         Instructions,
         Q,
         K_cache,
@@ -271,7 +272,7 @@ def profile_thundergqa(
     torch.cuda.synchronize()
     t0 = time.time()
     for it in range(ITERS):
-        gqa_decode_fn(
+        chunked_decode_fn(
             Instructions,
             Q,
             K_cache,
@@ -295,7 +296,7 @@ def profile_thundergqa(
     return (t1 - t0) / ITERS
 
 
-def run_gqa_torch(Q, K_cache, V_cache, K_new, V_new, cos, sin, Lengths, Table):
+def run_chunked_torch(Q, K_cache, V_cache, K_new, V_new, cos, sin, Lengths, Table, CHUNK_SIZE):
     q_heads = Q.shape[2]
     new_tokens = K_new.shape[1]
 
@@ -327,11 +328,16 @@ def run_gqa_torch(Q, K_cache, V_cache, K_new, V_new, cos, sin, Lengths, Table):
         full_V = torch.cat([v_from_cache, V_new[b : b + 1]], dim=1)
 
         full_seqlen = length + new_tokens
-        mask = (
+        causal_mask = (
             torch.ones(new_tokens, full_seqlen, dtype=torch.bool)
             .tril(diagonal=full_seqlen - new_tokens)
-            .to(Q.device)
+            # .to(Q.device)
         )
+        block_mask = (torch.arange(full_seqlen).unsqueeze(1) // CHUNK_SIZE == torch.arange(full_seqlen).unsqueeze(0) // CHUNK_SIZE)[-new_tokens:, :]
+
+        mask = (causal_mask & block_mask)
+
+        mask = mask.to(Q.device)
 
         O[b : b + 1] = torch.nn.functional.scaled_dot_product_attention(
             Q[b : b + 1].transpose(1, 2),
@@ -368,14 +374,10 @@ def retry_on_assertion(max_retries=5):
     return decorator
 
 
-def print_rounded(tensor, shape, decimals=4):
-    return torch.round(tensor.view(shape), decimals=decimals)
-
-
 @retry_on_assertion()
-def main(seq_lengths, new_tokens, q_heads=8):
+def main(seq_lengths, new_tokens, q_heads=8, chunk_size=8192):
     print(
-        f" ----------- batches: {len(seq_lengths)} mean seq_length: {np.mean(seq_lengths)} new_tokens: {new_tokens} q_heads: {q_heads} -----------"
+        f" ----------- batches: {len(seq_lengths)} mean seq_length: {np.mean(seq_lengths)} new_tokens: {new_tokens} q_heads: {q_heads} chunk_size: {chunk_size} -----------"
     )
     seq_lengths = sorted(seq_lengths)
     Q, K_cache, V_cache, Lengths, Table, K_new, V_new = init_arguments(
@@ -384,13 +386,13 @@ def main(seq_lengths, new_tokens, q_heads=8):
 
     cos, sin = create_rope_embeddings(Lengths, new_tokens, rope_dim=D)
 
-    ref, K_new_rope_applied = run_gqa_torch(
-        Q, K_cache, V_cache, K_new, V_new, cos, sin, Lengths, Table
+    ref, K_new_rope_applied = run_chunked_torch(
+        Q, K_cache, V_cache, K_new, V_new, cos, sin, Lengths, Table, chunk_size
     )
     Instructions, O_scratch, Lvec_scratch, Semaphore, Timings = (
-        create_thundergqa_arguments(seq_lengths, new_tokens, q_heads)
+        create_thunder_arguments(seq_lengths, new_tokens, q_heads)
     )
-    O, Timings = run_thundergqa(
+    O, Timings = run_thunder(
         Q,
         K_cache,
         V_cache,
@@ -418,7 +420,6 @@ def main(seq_lengths, new_tokens, q_heads=8):
         print(
             f"Cosine similarity mean: {cosine_similarity.mean()}, worst: {cosine_similarity.min()}"
         )
-        print(cosine_similarity.shape)
         print("out", O[..., :2, -4:])
         print("ref", ref[..., :2, -4:])
         print("\nError pattern:")
@@ -469,7 +470,7 @@ def main(seq_lengths, new_tokens, q_heads=8):
             print("Candidate", cached_V[..., :4])
             assert False, "V_cache update failed"
 
-    # time_per_iter = profile_thundergqa(
+    # time_per_iter = profile_thunder(
     #     Q,
     #     K_cache,
     #     V_cache,
@@ -489,81 +490,33 @@ def main(seq_lengths, new_tokens, q_heads=8):
     # save_gantt_chart(Timings, Instructions, name="new")
 
 
-if __name__ == "__main__":
-    main([1], 1, 8)
-    main([16], 4, 8)
-    main([64], 2, 8)
-    main([4641, 45118, 1730, 1696], 4, 8)
-    main([65536], 1, 8)
-    main([512] * 64, 2, 8)
-    main([4096] * 132, 4, 8)
-    main(
-        [
-            871,
-            568,
-            711,
-            329,
-            617,
-            1015,
-            348,
-            978,
-            543,
-            837,
-            650,
-            1020,
-            924,
-            679,
-            560,
-            497,
-            650,
-            406,
-            381,
-            423,
-            511,
-            423,
-            569,
-            943,
-            645,
-            820,
-            829,
-            883,
-            937,
-            765,
-            711,
-            847,
-            722,
-            546,
-            519,
-            279,
-            516,
-            315,
-            664,
-            845,
-            850,
-            546,
-            670,
-            871,
-            527,
-            329,
-            446,
-            764,
-            582,
-            1011,
-            453,
-            655,
-            532,
-            985,
-            1019,
-            810,
-            317,
-            305,
-            949,
-            317,
-            669,
-            768,
-            530,
-            349,
-        ],
-        4,
-        8,
+def get_random_seq_lengths(B):
+    torch.manual_seed(seed)
+
+    BUFFER_SIZE = 10
+
+    M = PAGE_SIZE * (NUM_PAGES // B - BUFFER_SIZE - 1) + 1
+    seq_lengths =  torch.randint(1, M // 10, (B,)).tolist()
+
+    B = len(seq_lengths)
+    max_pages_in_batch = (
+        math.ceil((max(seq_lengths) / PAGE_SIZE)) + BUFFER_SIZE
     )
+
+    assert B * max_pages_in_batch <= NUM_PAGES
+
+    return seq_lengths
+
+
+if __name__ == "__main__":
+    seq_lens = [get_random_seq_lengths(batch_size) for batch_size in torch.randint(1, NUM_PROCESSORS, (100,))]
+    # seq_lens = [[1], [16], [64], [4641, 45118, 1730, 1696], [8190] * 2, [8191] * 3, [8192] * 5, [8193] * 7, [65536], [65537] * 2, [65539] * 3, [512] * 64, [4096] * 132, [871, 568, 711, 329, 617, 1015, 348, 978, 543, 837, 650, 1020, 924, 679, 560, 497, 650, 406, 381, 423, 511, 423, 569, 943, 645, 820, 829, 883, 937, 765, 711, 847, 722, 546, 519, 279, 516, 315, 664, 845, 850, 546, 670, 871, 527, 329, 446, 764, 582, 1011, 453, 655, 532, 985, 1019, 810, 317, 305, 949, 317, 669, 768, 530, 349]]
+    num_new_tokens = [1, 2, 4]
+    q_heads = [8]
+    chunk_sizes = [8192]
+
+    for seq_len in seq_lens:
+        for new_tokens in num_new_tokens:
+            for q_head in q_heads:
+                for chunk_size in chunk_sizes:
+                    main(seq_len, new_tokens, q_head, chunk_size)

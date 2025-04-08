@@ -86,7 +86,7 @@ struct partial_layout {
         rt_fl<16, QKVO_D_d2> o;
     };
 };
-template<int Q_HEADS=8>
+template<int Q_HEADS=8, int CHUNK_SIZE=8192>
 struct partial_template {
     using config = config<Q_HEADS>;
     using layout = partial_layout<Q_HEADS>;
@@ -217,6 +217,19 @@ struct partial_template {
                         args.common.length - args.common.start_pos - args.iter*NUM_ROWS :
                         args.common.q_seq_idx + warpgroup::warpid() + 1;  // include self for new tokens
                     right_fill(att_block_fp32, att_block_fp32, num_valid_tokens, -9999999999.f);
+                }
+
+                const int q_idx = args.common.length + args.common.q_seq_idx + warpgroup::warpid();
+                const int block_start = q_idx - (q_idx % CHUNK_SIZE);
+
+                // workaround for new tokens case
+                const int k_idx = !do_right_fill && do_new_tokens ? args.common.length : args.common.start_pos + NUM_ROWS*args.iter;
+
+                const int mask_width = min(block_start - k_idx, NUM_ROWS);
+
+                // if whole block is empty can we skip?
+                if (mask_width > 0) {
+                    left_fill(att_block_fp32, att_block_fp32, mask_width, -9999999999.f);
                 }
 
                 row_max(local_max_vec, att_block_fp32, local_max_vec);
@@ -611,9 +624,9 @@ float get_quality(const std::vector<float>& next_times_input, int num_processors
     return min_value;
 }
 
-PYBIND11_MODULE(gqa_decode, m) {
-    m.doc() = "gqa_decode python module";
-    kittens::py::bind_kernel<interpreter::kernel<config<8>, partial_template<8>, reduction_template<8>>>(m, "gqa_decode_8_heads",
+PYBIND11_MODULE(chunked_decode, m) {
+    m.doc() = "chunked_decode python module";
+    kittens::py::bind_kernel<interpreter::kernel<config<8>, partial_template<8, 8192>, reduction_template<8>>>(m, "chunked_decode_8_heads_8192_chunk",
         &config<8>::globals::instructions,
         &config<8>::globals::Q,
         &config<8>::globals::K_cache,
