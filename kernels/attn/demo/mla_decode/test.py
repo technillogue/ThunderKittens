@@ -144,7 +144,7 @@ def create_rope_embeddings(seq_lengths, new_tokens, rope_dim, base: float = 1000
     return sin, cos
 
 
-def apply_rope(X, Lengths, sin, cos):
+def apply_rope(X, RopeLengths, sin, cos):
     assert X.ndim == 3 or X.ndim == 4
 
     X_rope = X.clone()
@@ -175,11 +175,12 @@ def apply_rope(X, Lengths, sin, cos):
         return torch.cat([x_rot1, x_rot2], dim=-1)
 
     # Could just do this at once as a batch operation, but good enough for now
-    for batch_idx in range(len(Lengths)):
-        seq_length = Lengths[batch_idx]
+    for batch_idx in range(len(RopeLengths)):
+        seq_length = RopeLengths[batch_idx]
         X_rope[batch_idx] = rotate(X_rope[batch_idx], seq_length)
 
     return X_rope
+
 
 
 def run_thundermla(
@@ -196,6 +197,7 @@ def run_thundermla(
     O_scratch,
     Lvec_scratch,
     Semaphore,
+    RopeLengths,
     Timings,
     tic=None,
 ):
@@ -227,6 +229,7 @@ def run_thundermla(
         Semaphore,
         softmax_scale,
         tic,
+        RopeLengths,
         Timings,
     )
     mla_decode_fn(
@@ -246,6 +249,7 @@ def run_thundermla(
         Semaphore,
         softmax_scale,
         1 - tic,
+        RopeLengths,
         Timings,
     )
     torch.cuda.synchronize()
@@ -325,12 +329,12 @@ def profile_thundermla(
     return (t1 - t0) / ITERS
 
 
-def run_mla_torch(QRot, QV, K_cache, V_cache, K_new, V_new, sin, cos, Lengths, Table):
+def run_mla_torch(QRot, QV, K_cache, V_cache, K_new, V_new, sin, cos, Lengths, RopeLengths, Table):
     q_heads = QRot.shape[2]
     new_tokens = K_new.shape[1]
 
     # RoPE for Q
-    QRot_rope_applied = apply_rope(QRot, Lengths, sin, cos)
+    QRot_rope_applied = apply_rope(QRot, RopeLengths, sin, cos)
     Q = torch.concat([QRot_rope_applied, QV], dim=-1)
 
     # RoPE for K
@@ -415,11 +419,13 @@ def main(seq_lengths, new_tokens, q_heads=16):
     QRot, QV, K_cache, V_cache, Lengths, Table, K_new, V_new = init_arguments(
         seq_lengths, new_tokens, q_heads
     )
+    # pretend like 0-10 tokens at the end of each sequence were dropped
+    RopeLengths = Lengths + torch.randint(0, 10, Lengths.shape, device=Lengths.device, dtype=Lengths.dtype)
 
-    sin, cos = create_rope_embeddings(Lengths, new_tokens, rope_dim=D_Rot)
+    sin, cos = create_rope_embeddings(RopeLengths, new_tokens, rope_dim=D_Rot)
 
     ref, K_new_rope_applied = run_mla_torch(
-        QRot, QV, K_cache, V_cache, K_new, V_new, sin, cos, Lengths, Table
+        QRot, QV, K_cache, V_cache, K_new, V_new, sin, cos, Lengths, RopeLengths, Table
     )
     Instructions, O_scratch, Lvec_scratch, Semaphore, Timings = (
         create_thundermla_arguments(seq_lengths, new_tokens, q_heads)
@@ -438,6 +444,7 @@ def main(seq_lengths, new_tokens, q_heads=16):
         O_scratch,
         Lvec_scratch,
         Semaphore,
+        RopeLengths,
         Timings,
     )
 
