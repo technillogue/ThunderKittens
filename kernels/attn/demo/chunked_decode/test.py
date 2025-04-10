@@ -101,7 +101,7 @@ def create_thunder_arguments(seq_lengths, new_tokens, q_heads=8):
         zip(seq_lengths, start_processors, num_processors)
     ):
         new_tasks, partial_uid, reduction_uid = backward_schedule(
-            list(range(start_p, start_p + num_p)),
+            (np.arange(start_p, start_p + num_p) % NUM_PROCESSORS).tolist(),
             batch_id,
             seq_l,
             list(range(new_tokens)),
@@ -518,8 +518,15 @@ def get_random_seq_lengths(B):
 
 
 if __name__ == "__main__":
-    # seq_lens = [[64] * 115 + [300] * 10]
-    seq_lens = [get_random_seq_lengths(batch_size) for batch_size in torch.randint(1, NUM_PROCESSORS, (1000,))]
+    NUM_SEQ_LENGTHS = 1000
+    # seq_lens = [[1] * 131 + [256] * 1]
+    # 2 <= K <= NUM_PROCESSORS - 1
+    # K = NUM_PROCESSORS - 1
+    # seq_lens = [[1] * (NUM_PROCESSORS - K + 1) + [128 * K] * 1]
+    # seq_lens = [[1] * (150)]
+    # print(seq_lens)
+    # seq_lens = [[1, 133]]
+    seq_lens = [get_random_seq_lengths(batch_size) for batch_size in torch.randint(1, NUM_PROCESSORS, (NUM_SEQ_LENGTHS,))]
     # seq_lens = [[1], [16], [64], [4641, 45118, 1730, 1696], [8190] * 2, [8191] * 3, [8192] * 5, [8193] * 7, [65536], [65537] * 2, [65539] * 3, [512] * 64, [4096] * 132, [871, 568, 711, 329, 617, 1015, 348, 978, 543, 837, 650, 1020, 924, 679, 560, 497, 650, 406, 381, 423, 511, 423, 569, 943, 645, 820, 829, 883, 937, 765, 711, 847, 722, 546, 519, 279, 516, 315, 664, 845, 850, 546, 670, 871, 527, 329, 446, 764, 582, 1011, 453, 655, 532, 985, 1019, 810, 317, 305, 949, 317, 669, 768, 530, 349]]
     num_new_tokens = [1, 2, 4]
     q_heads = [8]
