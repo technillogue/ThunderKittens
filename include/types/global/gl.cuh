@@ -8,6 +8,7 @@
 #include "../../common/common.cuh"
 #include "../shared/shared.cuh"
 #include "util.cuh"
+#include <optional>
 #ifdef KITTENS_HOPPER
 #include <utility>
 #include "tma.cuh"
@@ -217,5 +218,13 @@ template<ducks::gl::all GL, bool safe=true> __host__ inline GL make_gl(uint64_t 
         make_unsafe_gl_arg<GL::__c__>(c)
     );
 }
+
+template<ducks::gl::all GL> struct optional {
+    std::optional<GL> _obj;
+
+    __host__ __device__ bool has_value() const {return _obj.has_value();}
+    __host__ __device__ GL value() const {return _obj.value();}
+};
+
 
 } // namespace kittens

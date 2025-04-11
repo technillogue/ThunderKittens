@@ -11,6 +11,17 @@ template<typename T> struct from_object {
         return obj.cast<T>();
     }
 };
+
+template<ducks::gl::all GL> struct from_object<kittens::optional<GL>> {
+    static kittens::optional<GL> make(pybind11::object obj) {
+        printf("inside optional from_object, obj is none? %d\n", obj.is_none());
+        if (obj.is_none()) {
+            return kittens::optional<GL>(std::nullopt);
+        }
+        return kittens::optional<GL>(from_object<GL>::make(obj));
+    }
+};
+
 template<ducks::gl::all GL> struct from_object<GL> {
     static GL make(pybind11::object obj) {
         // Check if argument is a torch.Tensor
@@ -52,6 +63,7 @@ template<typename> struct trait;
 template<typename MT, typename T> struct trait<MT T::*> { using member_type = MT; using type = T; };
 template<typename> using object = pybind11::object;
 template<auto kernel, typename TGlobal> static void bind_kernel(auto m, auto name, auto TGlobal::*... member_ptrs) {
+
     m.def(name, [](object<decltype(member_ptrs)>... args) {
         TGlobal __g__ {from_object<typename trait<decltype(member_ptrs)>::member_type>::make(args)...};
         if constexpr (has_dynamic_shared_memory<TGlobal>) {
