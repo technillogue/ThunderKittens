@@ -36,7 +36,8 @@ using o_scratch_global    = kittens::gl<float, -1, -1, Q_HEADS, QVO_D, st_fl<16,
 template<int Q_HEADS=16>
 using lvec_scratch_global = kittens::gl<float,  1, -1, -1, Q_HEADS, sv_fl<16>>; // For partial O's
 using semaphore_global    = kittens::gl<int,    1,  1,  -1, -1>;            // 1 * 1 * uid * NEWTOKENS
-using rope_seqlens_global = kittens::gl<int,    1,  1,   1, -1>; // rope_seqlens is a tensor of int32, shape is (1, 1, 1, B,)
+// rope_seqlens is a tensor of int32, shape is (1, 1, 1, B,)
+using rope_seqlens_global = kittens::optional<kittens::gl<int, 1, 1, 1, -1>;
 
 template<int Q_HEADS=16>
 struct config {
@@ -120,9 +121,11 @@ struct partial_template {
         // valid seqlen of the assigned batch
         args.common.length      =  args.instruction[8];
         // does this need a more explicit load?
-        args.common.rope_seqlen =  args.globals.rope_seqlens[args.common.q_batch_idx];
+        if (args.global.rope_seqlens == nullptr)
+            args.common.rope_seqlen = args.instructions[8];
+        else
+            args.common.rope_seqlen = args.globals.rope_seqlens[args.common.q_batch_idx];
         args.num_iters          = cdiv(args.common.end_pos - args.common.start_pos, NUM_ROWS);
-        
     }
     struct producer {
         __device__ static inline void setup(producer_setup_args<layout> args) {}
