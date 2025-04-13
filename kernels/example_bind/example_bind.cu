@@ -4,7 +4,8 @@ using namespace kittens;
 
 using my_layout = gl<float, -1, -1, -1, 64, st_fl<64,64>>; // An example layout that also instantiates a TMA descriptor on Hopper.
 struct globals {
-    my_layout in, out;
+    NAMED(my_layout, "in") in;
+    NAMED(my_layout, "out") out;
     dim3 grid()  { return dim3(in.batch, in.depth, in.rows); }
     dim3 block() { return dim3(in.cols); }
 };
@@ -20,5 +21,6 @@ void run_copy_kernel(globals g) {
 PYBIND11_MODULE(example_bind, m) {
     m.doc() = "example_bind python module";
     py::bind_kernel<copy_kernel>(m, "copy_kernel", &globals::in, &globals::out);
+    py::bind_kernel_named<copy_kernel>(m, "copy_kernel_named", &globals::in, &globals::out);
     py::bind_function<run_copy_kernel>(m, "wrapped_copy_kernel", &globals::in, &globals::out);
 }
