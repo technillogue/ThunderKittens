@@ -4,103 +4,99 @@
 #include <pybind11/pybind11.h>
 #include <type_traits> // Needed for remove_cvref_t
 
-// Helper macro to create a unique static constexpr char array pointer for a string literal
-// not sure if this is *really* needed
-#define KITTENS_PY_ARG_NAME(s) \
-    [] { static constexpr char value[] = s; return value; }()
-
-
-// The wrapper struct template (stores value T and name pointer N)
-template<typename T, const char* N>
-struct kittens_py_named { // Using a more specific name to avoid potential conflicts
-    T value;
-    static constexpr const char* name_str = N;
-
-    // Constructor for easy initialization from the underlying type
-    kittens_py_named(T val = {}) : value(val) {}
-
-    // Allow implicit conversion back to the underlying type
-    operator T&() { return value; }
-    operator const T&() const { return value; }
-
-    // Explicit accessors if needed
-    T& get() { return value; }
-    const T& get() const { return value; }
-};
-
-// Convenience macro for declaring named members
-#define NAMED(TheType, TheNameStringLiteral) \
-    kittens_py_named<TheType, KITTENS_PY_ARG_NAME(TheNameStringLiteral)>
-
 
 namespace kittens {
 namespace py {
 
-// --- NEW: Traits and Helpers for Named Arguments ---
-namespace detail {
-
-// --- Name Trait ---
-// Base case: No name
-template<typename T>
-struct name_trait {
-    static constexpr const char* name = nullptr;
+// Base struct to hold any member pointer type
+template <typename TGlobal, typename MemberType>
+struct KernelArgBase {
+    MemberType TGlobal::*ptr;
+    constexpr explicit KernelArgBase(MemberType TGlobal::*p) : ptr(p) {}
 };
 
-// Specialization for our named wrapper
-template<typename T, const char* N>
-struct name_trait<kittens_py_named<T, N>> {
-    static constexpr const char* name = N;
+// Struct for an unnamed argument (just holds the pointer)
+// Note: This struct isn't strictly *required* anymore with the raw pointer handling,
+// but py_arg(&ptr) overload returning this can provide symmetry.
+template <typename TGlobal, typename MemberType>
+struct UnnamedKernelArg : KernelArgBase<TGlobal, MemberType> {
+    static constexpr const char* name_str = ""; // Empty name for py::arg("")
+    constexpr explicit UnnamedKernelArg(MemberType TGlobal::*p) : KernelArgBase<TGlobal, MemberType>(p) {}
 };
 
-// Helper to get name or "" for py::arg
-template<typename MemberType>
-constexpr const char* get_py_arg_name() {
-    // Use remove_cvref to handle potential const/volatile/reference qualifiers
-    constexpr const char* extracted_name = name_trait<std::remove_cvref_t<MemberType>>::name;
-    if constexpr (extracted_name != nullptr) {
-        return extracted_name;
-    } else {
-        // Return an empty string if no name is defined.
-        // py::arg("") implies positional-or-keyword with no specific name hint.
-        return "";
-    }
+// Struct for a named argument (holds pointer and name)
+template <typename TGlobal, typename MemberType>
+struct NamedKernelArg : KernelArgBase<TGlobal, MemberType> {
+    const char* name_str; // Name is runtime string literal passed via py_arg
+    constexpr NamedKernelArg(const char* n, MemberType TGlobal::*p) : KernelArgBase<TGlobal, MemberType>(p), name_str(n) {}
+};
+
+// Helper function to create a named argument wrapper (like py::arg)
+template <typename TGlobal, typename MemberType>
+constexpr NamedKernelArg<TGlobal, MemberType> py_arg(const char* name, MemberType TGlobal::*ptr) {
+    return NamedKernelArg<TGlobal, MemberType>(name, ptr);
 }
 
-// --- Underlying Type Trait ---
-// Base case: Type is itself
+// Helper function/overload for unnamed arguments (returns the UnnamedKernelArg wrapper)
+template <typename TGlobal, typename MemberType>
+constexpr UnnamedKernelArg<TGlobal, MemberType> py_arg(MemberType TGlobal::*ptr) {
+    return UnnamedKernelArg<TGlobal, MemberType>(ptr);
+}
+
+// Concept to check if a type is one of our *argument wrapper* structs (specifically NamedKernelArg or UnnamedKernelArg)
 template<typename T>
-struct underlying_type_trait {
-    using type = T;
+concept is_kernel_arg_wrapper = requires {
+    // Check if it inherits from KernelArgBase (or has the members directly)
+    typename T::pointer_type; // Example: Add a dummy type alias to the wrappers if needed
+} && (std::is_base_of_v<KernelArgBase<typename T::global_type, typename T::member_type>, T>); // Adjust based on how wrappers are defined
+
+// More robust check using type traits or specific markers might be needed depending on final struct definitions
+template<typename T>
+concept is_kernel_arg = std::is_base_of_v<KernelArgBase<typename T::global_type, typename T::member_type>, T>; // Simplified check if base works
+// If using the simple structs above:
+template<typename T> concept is_kernel_arg_wrapper_struct = requires (T t) {
+    { t.ptr } -> std::convertible_to<void*>; // Check if it has a 'ptr' member
+    { t.name_str }; // Check if it has 'name_str' (static or member)
 };
 
-// Specialization for our named wrapper
-template<typename T, const char* N>
-struct underlying_type_trait<kittens_py_named<T, N>> {
-    using type = T; // Extract the original type T
-};
 
-template<typename T>
-using underlying_type_t = typename underlying_type_trait<std::remove_cvref_t<T>>::type;
+// --- Traits and Helpers within detail namespace ---
+namespace detail {
+
+    // Helper to get the name string ("" for raw pointers)
+    template <typename ArgType>
+    constexpr const char* get_bind_arg_name(const ArgType& arg) {
+        // Check if it's one of our wrapper structs (NamedKernelArg or UnnamedKernelArg)
+        if constexpr (is_kernel_arg_wrapper_struct<ArgType>) {
+            return arg.name_str; // Return its stored name (could be "" for Unnamed)
+        } else {
+            // Otherwise, assume it's a raw member pointer and return "" for unnamed
+            static_assert(std::is_member_object_pointer_v<std::decay_t<ArgType>>, // Use decay_t
+                          "Argument must be a member object pointer or result of py_arg()");
+            return ""; // Treat raw pointers as unnamed
+        }
+    }
+
+    // Helper to get the underlying member pointer itself
+    template <typename ArgType>
+    constexpr auto get_bind_arg_pointer(const ArgType& arg) {
+         // Check if it's one of our wrapper structs
+         if constexpr (is_kernel_arg_wrapper_struct<ArgType>) {
+            return arg.ptr; // Return the stored pointer
+        } else {
+            // Otherwise, it's already the raw member pointer
+            static_assert(std::is_member_object_pointer_v<std::decay_t<ArgType>>, // Use decay_t
+                          "Argument must be a member object pointer or result of py_arg()");
+            return arg; // Return the raw pointer itself
+        }
+    }
 
 } // namespace detail
+
 
 template<typename T> struct from_object {
     static T make(pybind11::object obj) {
         return obj.cast<T>();
-    }
-};
-
-template<typename T, const char* N>
-struct from_object<kittens_py_named<T, N>> {
-    static kittens_py_named<T, N> make(pybind11::object obj) {
-        // Delegate to from_object for the underlying type T
-        // Note: We use `detail::underlying_type_t` here just in case T itself
-        // could be complex, but usually just `T` is fine. Using `T` directly is simpler.
-        // T underlying_value = from_object<detail::underlying_type_t<T>>::make(obj);
-        T underlying_value = from_object<T>::make(obj); // Simpler version
-
-        // Wrap the result in the 'kittens_py_named' struct
-        return kittens_py_named<T, N>{underlying_value};
     }
 };
 
@@ -174,43 +170,39 @@ template<auto function, typename TGlobal> static void bind_function(auto m, auto
     });
 }
 
-// new
-template<auto kernel, typename TGlobal>
-static void bind_kernel_named(pybind11::module_ m, const char* func_name, auto TGlobal::*... member_ptrs) {
+// --- Kernel Binding Functions ---
 
-    auto kernel_lambda = [](object<decltype(member_ptrs)>... args) {
-        // Construct TGlobal using from_object with the *actual* member type (T or named<T,N>)
-        TGlobal __g__ {
+// NEW: bind_kernel_named (accepts mix of raw pointers and py_arg wrappers)
+template <auto kernel, typename TGlobal, typename... Args>
+static void bind_kernel_named(pybind11::module_ m, const char* func_name, Args... args)
+{
+    auto kernel_lambda = [args...](pybind11::object... py_objs) {
+        TGlobal __g__{
             from_object<
-                typename trait<decltype(member_ptrs)>::member_type
-            >::make(args)...
+                typename trait<decltype(detail::get_bind_arg_pointer(args))>::member_type
+            >::make(py_objs)...
         };
 
-        // Launch the kernel
         if constexpr (has_dynamic_shared_memory<TGlobal>) {
             int __dynamic_shared_memory__ = (int)__g__.dynamic_shared_memory();
+            // Note: Setting attributes might require the actual kernel function pointer,
+            // ensure 'kernel' is correctly passed (e.g., pointer to instantiated function).
             cudaError_t err_attr = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, __dynamic_shared_memory__);
-             if (err_attr != cudaSuccess) {
-                 throw std::runtime_error(std::string("Failed to set dynamic shared memory: ") + cudaGetErrorString(err_attr));
-             }
+             if (err_attr != cudaSuccess) { throw std::runtime_error(std::string("Failed to set dynamic shared memory: ") + cudaGetErrorString(err_attr)); }
             kernel<<<__g__.grid(), __g__.block(), __dynamic_shared_memory__>>>(__g__);
         } else {
             kernel<<<__g__.grid(), __g__.block()>>>(__g__);
         }
-        CHECK_CUDA_ERROR(cudaGetLastError())
+         cudaError_t err_launch = cudaGetLastError();
+         if (err_launch != cudaSuccess) { throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err_launch)); }
+         // Optional: cudaDeviceSynchronize();
     };
 
-    // Define the function using m.def, unpacking the py::arg names
     m.def(func_name,
           kernel_lambda,
-          // Generate py::arg("name") or py::arg("") for each member
-          pybind11::arg(
-              detail::get_py_arg_name< // Use helper to get name string...
-                  typename trait<decltype(member_ptrs)>::member_type // ...from the actual member type (T or named<T,N>)
-              >()
-          )... // ...for each member pointer (pack expansion)
+          pybind11::arg(detail::get_bind_arg_name(args))... // Use helper for names
     );
-}
+}// new
 
 } // namespace py
 } // namespace kittens

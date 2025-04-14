@@ -8,9 +8,9 @@ using namespace kittens;
 
 struct micro_globals {
     using _gl  = gl<float, -1, -1, -1, 64, st_fl<_row, _col>>;
-    NAMED(_gl, "x") x;
-    NAMED(kittens::optional<_gl>, "y") y;
-    NAMED(_gl, "o") o;
+    _gl x;
+    kittens::optional<_gl> y;
+    _gl o;
 
     dim3 grid()  { return dim3(x.batch(), x.depth(), x.rows()); }
     dim3 block() { return dim3(x.cols()); }
@@ -66,5 +66,5 @@ void micro_tk(const __grid_constant__ micro_globals g) {
 PYBIND11_MODULE(micro_add, m) {
     m.doc() = "micro_add python module";
     kittens::py::bind_kernel<micro_tk>(m, "add_mats", &micro_globals::x, &micro_globals::y, &micro_globals::o);
-    kittens::py::bind_kernel_named<micro_tk>(m, "add_mats", &micro_globals::x, &micro_globals::y, &micro_globals::o);
+    kittens::py::bind_kernel_named<micro_tk>(m, "add_mats", &micro_globals::x, py_arg("y", &micro_globals::y), py_arg("o", &micro_globals::o));
 }
