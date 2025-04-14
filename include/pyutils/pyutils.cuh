@@ -42,7 +42,7 @@ template <typename TGlobal, typename MemberType>
 constexpr UnnamedKernelArg<TGlobal, MemberType> py_arg(MemberType TGlobal::*ptr) {
     return UnnamedKernelArg<TGlobal, MemberType>(ptr);
 }
-
+// not sure if needed
 // Concept to check if a type is one of our *argument wrapper* structs (specifically NamedKernelArg or UnnamedKernelArg)
 template<typename T>
 concept is_kernel_arg_wrapper = requires {
@@ -62,6 +62,36 @@ template<typename T> concept is_kernel_arg_wrapper_struct = requires (T t) {
 
 // --- Traits and Helpers within detail namespace ---
 namespace detail {
+    // Concept to check if a type is already one of our wrappers
+    template<typename T>
+    concept is_kernel_arg_wrapper = requires(T t) {
+        typename T::global_type;
+        typename T::member_type;
+        { t.ptr } -> std::convertible_to<void*>;
+    } && (std::is_same_v<T, NamedKernelArg<typename T::global_type, typename T::member_type>> ||
+          std::is_same_v<T, UnnamedKernelArg<typename T::global_type, typename T::member_type>>);
+
+    // Helper to wrap raw pointers into UnnamedKernelArg
+    template <typename ArgType>
+    constexpr auto wrap_if_needed(const ArgType& arg) {
+        // Check if it's already one of our wrapper structs
+        if constexpr (is_kernel_arg_wrapper<std::decay_t<ArgType>>) {
+            return arg; // Pass through if already wrapped
+        } else {
+            // Otherwise, assume it's a raw member pointer and wrap it
+            using ArgDecayed = std::decay_t<ArgType>;
+            static_assert(std::is_member_object_pointer_v<ArgDecayed>,
+                          "Argument must be a member object pointer or result of py_arg()");
+
+            // Extract TGlobal and MemberType using the trait struct
+            using PtrTraits = trait<ArgDecayed>;
+            using TGlobal = typename PtrTraits::type;
+            using MemberType = typename PtrTraits::member_type;
+
+            // Wrap the raw pointer in UnnamedKernelArg
+            return UnnamedKernelArg<TGlobal, MemberType>(arg);
+        }
+    }
 
     // Helper to get the name string ("" for raw pointers)
     template <typename ArgType>
@@ -91,6 +121,49 @@ namespace detail {
         }
     }
 
+
+    // --- Implementation function that takes ONLY wrappers ---
+    // (This contains the lambda and m.def logic from the previous "force wrapping" attempt)
+    template <auto kernel, typename TGlobal, typename... WrappedArgs>
+    static void bind_kernel_named_impl(pybind11::module_ m, const char* func_name, WrappedArgs... wrapped_args)
+    {
+        // Static assert to double-check (should be guaranteed by caller)
+        static_assert((detail::is_kernel_arg_wrapper<WrappedArgs> && ...),
+                      "Internal error: bind_kernel_named_impl called with non-wrapper arguments");
+
+        // The simple lambda captures the homogeneous pack of wrappers
+        auto kernel_lambda = [=](pybind11::object... py_objs) {
+            // Runtime arity check
+            if (sizeof...(WrappedArgs) != sizeof...(py_objs)) {
+                 throw pybind11::type_error("Kernel expected " + std::to_string(sizeof...(WrappedArgs))
+                                            + " arguments, but got " + std::to_string(sizeof...(py_objs)));
+            }
+
+            TGlobal __g__{
+                from_object<
+                    // Use the OVERLOADED helper on the captured wrapper
+                    typename trait<decltype(detail::get_bind_arg_pointer_impl(wrapped_args))>::member_type
+                >::make(py_objs)...
+            };
+
+            // Kernel launch logic (same as before, with error checking)
+            if constexpr (has_dynamic_shared_memory<TGlobal>) {
+                int __dynamic_shared_memory__ = (int)__g__.dynamic_shared_memory();
+                cudaError_t err = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, __dynamic_shared_memory__);
+                CHECK_CUDA_ERROR(err);
+                kernel<<<__g__.grid(), __g__.block(), __dynamic_shared_memory__>>>(__g__);
+            } else {
+                kernel<<<__g__.grid(), __g__.block()>>>(__g__);
+            }
+            CHECK_CUDA_ERROR(cudaGetLastError());
+        };
+
+        // m.def uses the OVERLOADED helper on the original wrapped_args pack
+        m.def(func_name,
+              kernel_lambda,
+              pybind11::arg(detail::get_bind_arg_name_impl(wrapped_args))...
+        );
+    }
 } // namespace detail
 
 
@@ -172,37 +245,18 @@ template<auto function, typename TGlobal> static void bind_function(auto m, auto
 
 // --- Kernel Binding Functions ---
 
-// NEW: bind_kernel_named (accepts mix of raw pointers and py_arg wrappers)
+// --- Public bind_kernel_named: Accepts mixed args, wraps, then calls impl ---
 template <auto kernel, typename TGlobal, typename... Args>
 static void bind_kernel_named(pybind11::module_ m, const char* func_name, Args... args)
 {
-    auto kernel_lambda = [=](pybind11::object... py_objs) {
-        TGlobal __g__{
-            from_object<
-                typename trait<decltype(detail::get_bind_arg_pointer(args))>::member_type
-            >::make(py_objs)...
-        };
-
-        if constexpr (has_dynamic_shared_memory<TGlobal>) {
-            int __dynamic_shared_memory__ = (int)__g__.dynamic_shared_memory();
-            // Note: Setting attributes might require the actual kernel function pointer,
-            // ensure 'kernel' is correctly passed (e.g., pointer to instantiated function).
-            cudaError_t err_attr = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, __dynamic_shared_memory__);
-             if (err_attr != cudaSuccess) { throw std::runtime_error(std::string("Failed to set dynamic shared memory: ") + cudaGetErrorString(err_attr)); }
-            kernel<<<__g__.grid(), __g__.block(), __dynamic_shared_memory__>>>(__g__);
-        } else {
-            kernel<<<__g__.grid(), __g__.block()>>>(__g__);
-        }
-         cudaError_t err_launch = cudaGetLastError();
-         if (err_launch != cudaSuccess) { throw std::runtime_error(std::string("CUDA kernel launch failed: ") + cudaGetErrorString(err_launch)); }
-         // Optional: cudaDeviceSynchronize();
-    };
-
-    m.def(func_name,
-          kernel_lambda,
-          pybind11::arg(detail::get_bind_arg_name(args))... // Use helper for names
+    // Call the implementation function, applying wrap_if_needed to each argument.
+    // This creates a new, homogeneous pack expansion of wrappers.
+    detail::bind_kernel_named_impl<kernel, TGlobal>(
+        m,
+        func_name,
+        detail::wrap_if_needed(args)... // Apply wrapping transformation HERE
     );
-}// new
+}
 
 } // namespace py
 } // namespace kittens
