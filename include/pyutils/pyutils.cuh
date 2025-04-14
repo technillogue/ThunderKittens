@@ -176,7 +176,7 @@ template<auto function, typename TGlobal> static void bind_function(auto m, auto
 template <auto kernel, typename TGlobal, typename... Args>
 static void bind_kernel_named(pybind11::module_ m, const char* func_name, Args... args)
 {
-    auto kernel_lambda = [args...](pybind11::object... py_objs) {
+    auto kernel_lambda = [=](pybind11::object... py_objs) {
         TGlobal __g__{
             from_object<
                 typename trait<decltype(detail::get_bind_arg_pointer(args))>::member_type

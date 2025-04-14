@@ -66,5 +66,5 @@ void micro_tk(const __grid_constant__ micro_globals g) {
 PYBIND11_MODULE(micro_add, m) {
     m.doc() = "micro_add python module";
     kittens::py::bind_kernel<micro_tk>(m, "add_mats", &micro_globals::x, &micro_globals::y, &micro_globals::o);
-    kittens::py::bind_kernel_named<micro_tk>(m, "add_mats", &micro_globals::x, py_arg("y", &micro_globals::y), py_arg("o", &micro_globals::o));
+    kittens::py::bind_kernel_named<micro_tk>(m, "add_mats", &micro_globals::x, kittens::py::py_arg("y", &micro_globals::y), kittens::py::py_arg("o", &micro_globals::o));
 }
