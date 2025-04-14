@@ -3,10 +3,14 @@
 #include "util.cuh"
 #include <pybind11/pybind11.h>
 #include <type_traits> // Needed for remove_cvref_t
-
+#include <utility> 
 
 namespace kittens {
 namespace py {
+
+template<typename> struct trait;
+template<typename MT, typename T> struct trait<MT T::*> { using member_type = MT; using type = T; };
+template<typename> using object = pybind11::object;
 
 // Base struct to hold any member pointer type
 template <typename TGlobal, typename MemberType>
@@ -84,7 +88,7 @@ namespace detail {
                           "Argument must be a member object pointer or result of py_arg()");
 
             // Extract TGlobal and MemberType using the trait struct
-            using PtrTraits = trait<ArgDecayed>;
+            using PtrTraits = kittens::py::trait<ArgDecayed>;
             using TGlobal = typename PtrTraits::type;
             using MemberType = typename PtrTraits::member_type;
 
@@ -133,18 +137,30 @@ namespace detail {
 
         // The simple lambda captures the homogeneous pack of wrappers
         auto kernel_lambda = [=](pybind11::object... py_objs) {
-            // Runtime arity check
-            if (sizeof...(WrappedArgs) != sizeof...(py_objs)) {
-                 throw pybind11::type_error("Kernel expected " + std::to_string(sizeof...(WrappedArgs))
-                                            + " arguments, but got " + std::to_string(sizeof...(py_objs)));
+            auto py_args_tuple = std::forward_as_tuple(py_objs...);
+            constexpr size_t num_py_args = std::tuple_size_v<decltype(py_args_tuple)>;
+            constexpr size_t num_expected_args = sizeof...(WrappedArgs);
+
+            // --- Use tuple size for arity check ---
+            if (num_expected_args != num_py_args) {
+                 throw pybind11::type_error("Kernel expected " + std::to_string(num_expected_args)
+                                            + " arguments, but got " + std::to_string(num_py_args));
             }
 
-            TGlobal __g__{
-                from_object<
-                    // Use the OVERLOADED helper on the captured wrapper
-                    typename trait<decltype(detail::get_bind_arg_pointer_impl(wrapped_args))>::member_type
-                >::make(py_objs)...
+            // --- Workaround: Construct TGlobal using index_sequence ---
+            // Helper lambda defined inside to capture necessary variables
+            auto construct_globals = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                // Create tuple of the captured wrappers to access them by index
+                auto captured_wrappers_tuple = std::make_tuple(wrapped_args...);
+                return TGlobal{
+                    from_object<
+                        // Get pointer via impl helper, get type via trait (qualified)
+                        typename kittens::py::trait<decltype(detail::get_bind_arg_pointer_impl(std::get<Is>(captured_wrappers_tuple)))>::member_type
+                    >::make(std::get<Is>(py_args_tuple))... // Expand using py_args_tuple elements
+                };
             };
+            // Call the helper to initialize globals
+            TGlobal __g__ = construct_globals(std::make_index_sequence<num_expected_args>{});
 
             // Kernel launch logic (same as before, with error checking)
             if constexpr (has_dynamic_shared_memory<TGlobal>) {
@@ -220,10 +236,8 @@ template<ducks::gl::all GL> struct from_object<GL> {
 
 template<typename T> concept has_dynamic_shared_memory = requires(T t) { { t.dynamic_shared_memory() } -> std::convertible_to<int>; };
 
-template<typename> struct trait;
-template<typename MT, typename T> struct trait<MT T::*> { using member_type = MT; using type = T; };
-template<typename> using object = pybind11::object;
-template<auto kernel, typename TGlobal> static void bind_kernel(auto m, auto name, auto TGlobal::*... member_ptrs) {
+template<auto kernel, typename TGlobal>
+static void bind_kernel(auto m, auto name, auto TGlobal::*... member_ptrs) {
 
     m.def(name, [](object<decltype(member_ptrs)>... args) {
         TGlobal __g__ {from_object<typename trait<decltype(member_ptrs)>::member_type>::make(args)...};
